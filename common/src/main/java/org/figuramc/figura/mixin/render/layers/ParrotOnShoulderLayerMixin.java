@@ -37,7 +37,7 @@ public abstract class ParrotOnShoulderLayerMixin<T extends Player> extends Rende
 
     @Inject(at = @At("HEAD"), method = "render(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/world/entity/player/Player;FFFFZ)V", cancellable = true)
     private void render(PoseStack matrices, MultiBufferSource vertexConsumers, int light, T player, float limbAngle, float limbDistance, float headYaw, float headPitch, boolean leftShoulder, CallbackInfo ci) {
-        Avatar avatar = AvatarManager.getAvatar(player);
+        Avatar avatar = AvatarManager.getAvatarForRender(player);
         if (!RenderUtils.vanillaModel(avatar))
             return;
 

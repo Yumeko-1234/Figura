@@ -142,6 +142,59 @@ public class Configs {
             ALLOW_FP_HANDS = new ConfigType.BoolConfig("allow_fp_hands", RENDERING, false),
             FIRST_PERSON_MATRICES = new ConfigType.BoolConfig("first_person_matrices", RENDERING, true),
             INVENTORY_SCISSOR = new ConfigType.BoolConfig("inventory_scissor", RENDERING, true);
+    public static final ConfigType.PositiveIntConfig
+            AVATAR_RENDER_DISTANCE = new ConfigType.PositiveIntConfig("avatar_render_distance", RENDERING, 32),
+            CULLED_AVATAR_TICK_INTERVAL = new ConfigType.PositiveIntConfig("culled_avatar_tick_interval", RENDERING, 4),
+            AVATAR_LOD_DISTANCE = new ConfigType.PositiveIntConfig("avatar_lod_distance", RENDERING, 8),
+            AVATAR_RENDER_SCRIPT_INTERVAL = new ConfigType.PositiveIntConfig("avatar_render_script_interval", RENDERING, 2),
+            FULL_DETAIL_AVATARS = new ConfigType.PositiveIntConfig("full_detail_avatars", RENDERING, 2),
+            FULL_RATE_ANIMATIONS = new ConfigType.PositiveIntConfig("full_rate_animations", RENDERING, 4),
+            UNLOAD_UNUSED_AVATARS = new ConfigType.PositiveIntConfig("unload_unused_avatars", RENDERING, 60),
+            FAR_SCRIPT_INTERVAL = new ConfigType.PositiveIntConfig("far_script_interval", RENDERING, 16),
+            AVATAR_TEXTURE_SIZE = new ConfigType.PositiveIntConfig("avatar_texture_size", RENDERING, 1024) {
+                @Override
+                public void onChange() {
+                    super.onChange();
+                    AvatarManager.executeAll("textureSize", avatar -> {
+                        if (avatar.renderer != null)
+                            avatar.renderer.markTexturesDirty();
+                    });
+                }
+            };
+    public static final ConfigType.PositiveFloatConfig
+            AVATAR_RENDER_SCRIPT_BUDGET = new ConfigType.PositiveFloatConfig("avatar_render_script_budget", RENDERING, 1f),
+            AVATAR_TICK_SCRIPT_BUDGET = new ConfigType.PositiveFloatConfig("avatar_tick_script_budget", RENDERING, 1f);
+    public static final ConfigType.BoolConfig
+            GECKOLIB_ITEM_CACHE = new ConfigType.BoolConfig("geckolib_item_cache", RENDERING, true),
+            REPLAY_CROWD_AVATARS = new ConfigType.BoolConfig("replay_crowd_avatars", RENDERING, true),
+            SPREAD_TICK_SCRIPTS = new ConfigType.BoolConfig("spread_tick_scripts", RENDERING, true),
+            AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
+            SIMPLIFY_AVATAR_BODIES = new ConfigType.BoolConfig("simplify_avatar_bodies", RENDERING, true),
+            CACHE_PART_MATRICES = new ConfigType.BoolConfig("cache_part_matrices", RENDERING, true),
+            SHARE_SHADOW_PASS_SCRIPTS = new ConfigType.BoolConfig("share_shadow_pass_scripts", RENDERING, true);
+    public static final ConfigType.EnumConfig
+            BODY_LOD = new ConfigType.EnumConfig("body_lod", RENDERING, 3, 4) {
+                @Override
+                public void onChange() {
+                    super.onChange();
+                    if (BODY_LOD_SELF.value)
+                        reloadHostAvatar();
+                }
+            };
+    public static final ConfigType.BoolConfig
+            BODY_LOD_SELF = new ConfigType.BoolConfig("body_lod_self", RENDERING, false) {
+                @Override
+                public void onChange() {
+                    super.onChange();
+                    reloadHostAvatar();
+                }
+            };
+
+    // config values are also set while the game is starting, before there is anything to reload
+    private static void reloadHostAvatar() {
+        if (Minecraft.getInstance() != null && Minecraft.getInstance().level != null)
+            AvatarManager.reloadAvatar(FiguraMod.getLocalPlayerUUID());
+    }
 
 
     // -- ACTION WHEEL -- // 
@@ -216,7 +269,7 @@ public class Configs {
                     NetworkStuff.checkVersion();
                 }
             },
-            DEFAULT_PERMISSION_LEVEL = new ConfigType.EnumConfig("default_permission_level", MISC, 2, Permissions.Category.values().length) {
+            DEFAULT_PERMISSION_LEVEL = new ConfigType.EnumConfig("default_permission_level", MISC, 4, Permissions.Category.values().length) {
                 {
                     List<Component> list = new ArrayList<>();
                     Permissions.Category[] categories = Permissions.Category.values();

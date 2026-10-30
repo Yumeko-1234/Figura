@@ -7,6 +7,7 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.world.item.Item;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.compat.GeoItemMeshCache;
 import org.figuramc.figura.ducks.GeckolibGeoArmorAccessor;
 import org.figuramc.figura.lua.api.vanilla_model.VanillaPart;
 import org.figuramc.figura.model.ParentType;
@@ -43,6 +44,9 @@ public interface GeckolibGeoRendererMixin<T extends GeoAnimatable> {
         CallbackInfo callbackInfo = new CallbackInfo("figura$renderPivots", true);
         figura$renderPivots(poseStack, animatable, model, renderType, bufferSource, buffer, isReRender, partialTick, packedLight, packedOverlay, red, green, blue, alpha, callbackInfo);
         if (callbackInfo.isCancelled())
+            return;
+
+        if (GeoItemMeshCache.render((GeoRenderer<?>) (Object) this, poseStack, animatable, model, renderType, bufferSource, buffer, isReRender, partialTick, packedLight, packedOverlay, red, green, blue, alpha))
             return;
 
         for (GeoBone group : model.topLevelBones()) {

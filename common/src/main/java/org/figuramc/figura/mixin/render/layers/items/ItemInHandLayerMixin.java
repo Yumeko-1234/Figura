@@ -40,7 +40,7 @@ public abstract class ItemInHandLayerMixin<T extends LivingEntity, M extends Ent
 
         boolean left = humanoidArm == HumanoidArm.LEFT;
 
-        Avatar avatar = AvatarManager.getAvatar(livingEntity);
+        Avatar avatar = AvatarManager.getAvatarForRender(livingEntity);
         if (!RenderUtils.renderArmItem(avatar, left, ci))
             return;
 

@@ -117,7 +117,8 @@ public class LuaSound {
         // but the function cannot exit early past here (other than crashing) so its fine
         this.playing = true;
         AvatarManager.executeAll("playSoundEvent", avatar -> {
-            boolean cancel = avatar.playSoundEvent(
+            // the event args are only built for avatars listening to it
+            boolean cancel = avatar.hasListeners("ON_PLAY_SOUND") && avatar.playSoundEvent(
                 this.getId(),
                 this.getPos(),
                 this.getVolume(), this.getPitch(),

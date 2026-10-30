@@ -45,8 +45,17 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
 
     public final PartCustomization customization;
     public PartCustomization savedCustomization;
+    // reused copy behind savedCustomization, since the customization stack reuses its entries
+    public PartCustomization savedCustomizationStore;
     public ParentType parentType = ParentType.None;
-    public PartCustomization playerCustomization;
+    // offset pivot, pos, rot and scale from before applyVanillaTransforms, restored by resetVanillaTransforms
+    private FiguraVec3[] savedOffsets;
+    private boolean vanillaApplied;
+    // scratch vectors for applyVanillaTransforms, only used on the render thread and never kept
+    private static final FiguraVec3 VANILLA_PIVOT = FiguraVec3.of(), VANILLA_SCALE = FiguraVec3.of();
+    // same for applyExtraTransforms, the rotation is built once with the exact values rotateY(180) gives
+    private static final FiguraMat4 EXTRA_MATRIX = FiguraMat4.of(), ROTATE_Y_180 = FiguraMat4.of().rotateY(180);
+    private static final FiguraVec3 EXTRA_PIVOT = FiguraVec3.of();
 
     private final Map<String, FiguraModelPart> childCache = new HashMap<>();
     public final List<FiguraModelPart> children;
@@ -66,6 +75,90 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     public final FiguraMat4 savedPartToWorldMat = FiguraMat4.of().scale(1 / 16d, 1 / 16d, 1 / 16d);
 
     public final Map<Integer, List<Vertex>> vertices;
+
+    // reduced copies of the vertices, used when the avatar is far away (index 0 is detail level 1)
+    // null when the part was not reduced, or when a script got hold of the vertices (it may edit them)
+    public Lod[] lods;
+
+    // used by Simplify Avatar Bodies, see FiguraModelPartReader.computeSimplifyInfo
+    // lodKeep: part of the head, never simplified
+    // lodSize: largest side, in model pixels, of the box around this part and its children at rest (max value when unknown)
+    // lodFaces: faces of this part and its children, taken from the complexity when the part is skipped
+    public boolean lodKeep;
+    public float lodSize = Float.MAX_VALUE;
+    public int lodFaces;
+
+    // box {minX, minY, minZ, maxX, maxY, maxZ} around the own vertices of this part, in model space, see getVertexBox
+    private float[] vertexBox;
+    private boolean vertexBoxComputed, verticesExposed;
+
+    // the vertices of each texture as one flat float array (see pack), read by the renderer instead of the vertex objects
+    // built when first drawn, dropped for good once a script got hold of the vertices (it may edit them at any time)
+    private float[][] packedVertices;
+
+    // floats per vertex in a packed array: x, y, z, u, v, nx, ny, nz
+    public static final int PACKED_STRIDE = 8;
+
+    public static float[] pack(List<Vertex> list) {
+        float[] packed = new float[list.size() * PACKED_STRIDE];
+        for (int i = 0, o = 0; i < list.size(); i++, o += PACKED_STRIDE) {
+            Vertex v = list.get(i);
+            packed[o] = v.x; packed[o + 1] = v.y; packed[o + 2] = v.z;
+            packed[o + 3] = v.u; packed[o + 4] = v.v;
+            packed[o + 5] = v.nx; packed[o + 6] = v.ny; packed[o + 7] = v.nz;
+        }
+        return packed;
+    }
+
+    // packed copy of the vertices of texture i, null when the vertex objects have to be read
+    public float[] packedVertices(int i) {
+        if (verticesExposed)
+            return null;
+        if (packedVertices == null)
+            packedVertices = new float[textures.size()][];
+        if (i >= packedVertices.length)
+            return null;
+        float[] packed = packedVertices[i];
+        if (packed == null) {
+            List<Vertex> list = vertices.get(i);
+            if (list == null)
+                return null;
+            packedVertices[i] = packed = pack(list);
+        }
+        return packed;
+    }
+
+    // if a script got hold of the vertex objects, so only they are up to date
+    public boolean verticesExposed() {
+        return verticesExposed;
+    }
+
+    public static class Lod {
+        public final Map<Integer, List<Vertex>> vertices;
+        public final List<Integer> facesByTexture;
+        private float[][] packed;
+
+        public Lod(Map<Integer, List<Vertex>> vertices, List<Integer> facesByTexture) {
+            this.vertices = vertices;
+            this.facesByTexture = facesByTexture;
+        }
+
+        // packed copy of the vertices of texture i, see FiguraModelPart.pack
+        public float[] packed(int i) {
+            if (packed == null)
+                packed = new float[facesByTexture.size()][];
+            if (i >= packed.length)
+                return null;
+            float[] p = packed[i];
+            if (p == null) {
+                List<Vertex> list = vertices.get(i);
+                if (list == null)
+                    return null;
+                packed[i] = p = pack(list);
+            }
+            return p;
+        }
+    }
 
     @LuaWhitelist
     @LuaFieldDoc("model_part.pre_render")
@@ -104,13 +197,46 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     }
 
     public boolean pushVerticesImmediate(ImmediateAvatarRenderer avatarRenderer, int[] remainingComplexity) {
+        int level = avatarRenderer.lodLevel;
+        if (avatarRenderer.simplifyBody && !lodKeep)
+            level = Math.max(level, FiguraModelPartReader.SIMPLIFY_LOD_LEVEL);
+        Lod lod = level > 0 && lods != null ? lods[Math.min(level, lods.length) - 1] : null;
+
         for (int i = 0; i < facesByTexture.size(); i++) {
             if (remainingComplexity[0] <= 0)
                 return false;
-            remainingComplexity[0] -= facesByTexture.get(i);
-            avatarRenderer.pushFaces(facesByTexture.get(i) + Math.min(remainingComplexity[0], 0), remainingComplexity, textures.get(i), vertices.get(i));
+            // complexity always counts the full detail faces, so a distant avatar never shows more than a close one
+            int faces = facesByTexture.get(i);
+            remainingComplexity[0] -= faces;
+            // (a detail level may share the vertex objects of the part, so its packed copy is dropped with them)
+            if (lod != null && remainingComplexity[0] >= 0 && i < lod.facesByTexture.size()) {
+                avatarRenderer.pushFaces(lod.facesByTexture.get(i), faces, remainingComplexity, textures.get(i), lod.vertices.get(i), lod.packed(i), this);
+            } else {
+                int count = faces + Math.min(remainingComplexity[0], 0);
+                avatarRenderer.pushFaces(count, count, remainingComplexity, textures.get(i), vertices.get(i), packedVertices(i), this);
+            }
         }
         return true;
+    }
+
+    // box around the own vertices of this part (not its children), null when it has none
+    // cached, unless a script got hold of the vertices (it may edit them at any time)
+    public float[] getVertexBox() {
+        if (vertexBoxComputed && !verticesExposed)
+            return vertexBox;
+
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (List<Vertex> list : vertices.values()) {
+            for (Vertex v : list) {
+                minX = Math.min(minX, v.x); minY = Math.min(minY, v.y); minZ = Math.min(minZ, v.z);
+                maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y); maxZ = Math.max(maxZ, v.z);
+            }
+        }
+
+        vertexBox = minX > maxX ? null : new float[] {minX, minY, minZ, maxX, maxY, maxZ};
+        vertexBoxComputed = true;
+        return vertexBox;
     }
 
     private Map<Integer, List<Vertex>> copyVertices() {
@@ -133,18 +259,23 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         VanillaModelData.PartData partData = vanillaModelData.partMap.get(this.parentType);
         if (partData == null)
             return;
-        playerCustomization = new PartCustomization();
-        customization.copyTo(playerCustomization);
+        // only the offsets are restored by resetVanillaTransforms, so only those are saved
+        // (into vectors kept on the part, instead of a full customization copy every frame)
+        if (savedOffsets == null)
+            savedOffsets = new FiguraVec3[] {FiguraVec3.of(), FiguraVec3.of(), FiguraVec3.of(), FiguraVec3.of()};
+        customization.getOffsets(savedOffsets[0], savedOffsets[1], savedOffsets[2], savedOffsets[3]);
+        vanillaApplied = true;
 
         // apply vanilla transforms
         customization.vanillaVisible = partData.visible;
 
-        FiguraVec3 defaultPivot = parentType.offset.copy();
+        FiguraVec3 defaultPivot = VANILLA_PIVOT.set(parentType.offset);
 
         defaultPivot.subtract(partData.pos);
 
         if (!overrideVanillaScale()) {
-            FiguraVec3 newScale = partData.scale.copy().multiply(customization.getOffsetScale());
+            // savedOffsets[3] is the offset scale from before this call
+            FiguraVec3 newScale = VANILLA_SCALE.set(partData.scale).multiply(savedOffsets[3]);
             defaultPivot.multiply(newScale);
             customization.offsetScale(newScale);
         }
@@ -160,31 +291,19 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     }
 
     public void resetVanillaTransforms() {
-        if (parentType.provider != null) {
+        // nothing to undo when applyVanillaTransforms didn't run (or was already undone)
+        // resetting anyway would wipe the offsets set by scripts, which matters when a mod resets twice
+        // (Figura ExtraFight does) and the render scripts don't run every frame (Other Avatars' Render Script Interval)
+        if (parentType.provider != null && vanillaApplied) {
             if (!overrideVanillaPos()) {
-                if (playerCustomization != null) {
-                    customization.offsetPivot(playerCustomization.getOffsetPivot());
-                    customization.offsetPos(playerCustomization.getOffsetPos());
-                } else {
-                    customization.offsetPivot(0, 0, 0);
-                    customization.offsetPos(0, 0, 0);
-                }
+                customization.offsetPivot(savedOffsets[0]);
+                customization.offsetPos(savedOffsets[1]);
             }
-            if (!overrideVanillaRot()) {
-                if (playerCustomization != null) {
-                    customization.offsetRot(playerCustomization.getOffsetRot());
-                } else {
-                    customization.offsetRot(0, 0, 0);
-                }
-            }
-            if (!overrideVanillaScale()) {
-                if (playerCustomization != null) {
-                    customization.offsetScale(playerCustomization.getOffsetScale());
-                } else {
-                    customization.offsetScale(1, 1, 1);
-                }
-            }
-            playerCustomization = null;
+            if (!overrideVanillaRot())
+                customization.offsetRot(savedOffsets[2]);
+            if (!overrideVanillaScale())
+                customization.offsetScale(savedOffsets[3]);
+            vanillaApplied = false;
             customization.vanillaVisible = null;
         }
     }
@@ -193,17 +312,17 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         if (parentType != ParentType.Camera)
             return;
 
-        FiguraMat4 prevPartToView = currentTransforms.positionMatrix.inverted();
+        // scratch matrix and vector instead of new ones every frame (setMatrix copies the result)
+        FiguraMat4 prevPartToView = EXTRA_MATRIX.set(currentTransforms.positionMatrix).invert();
         double s = 1 / 16d;
         if (UIHelper.paperdoll) {
             s *= -UIHelper.dollScale;
         } else {
-            prevPartToView.rightMultiply(FiguraMat4.of().rotateY(180));
+            prevPartToView.rightMultiply(ROTATE_Y_180);
         }
-        FiguraVec3 scale = currentTransforms.stackScale.scaled(s);
-        FiguraVec3 piv = customization.getPivot();
-        FiguraVec3 piv2 = customization.getOffsetPivot().add(piv);
-        prevPartToView.scale(scale);
+        FiguraVec3 scale = currentTransforms.stackScale;
+        FiguraVec3 piv2 = customization.getPivot(EXTRA_PIVOT, true);
+        prevPartToView.scale(scale.x * s, scale.y * s, scale.z * s);
         prevPartToView.v14 = prevPartToView.v24 = prevPartToView.v34 = 0;
         prevPartToView.translateFirst(-piv2.x, -piv2.y, -piv2.z);
         prevPartToView.translate(piv2.x, piv2.y, piv2.z);
@@ -262,6 +381,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     )
     public FiguraModelPart setPreRender(LuaFunction function) {
         this.preRender = function;
+        structureChanged();
         return this;
     }
 
@@ -275,6 +395,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     )
     public FiguraModelPart setMidRender(LuaFunction function) {
         this.midRender = function;
+        structureChanged();
         return this;
     }
 
@@ -288,7 +409,14 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     )
     public FiguraModelPart setPostRender(LuaFunction function) {
         this.postRender = function;
+        structureChanged();
         return this;
+    }
+
+    // the renderer caches which passes have work to do, from the render functions, parent types and children of all parts
+    private void structureChanged() {
+        if (owner != null && owner.renderer != null)
+            owner.renderer.structureVersion++;
     }
 
     @LuaWhitelist
@@ -1227,6 +1355,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     public FiguraModelPart setParentType(String parent) {
         ParentType oldParent = this.parentType;
         this.parentType = ParentType.get(parent);
+        structureChanged();
 
         if ((oldParent.isSeparate || this.parentType.isSeparate) && oldParent != this.parentType)
             owner.renderer.sortParts();
@@ -1399,6 +1528,9 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             value = "model_part.get_vertices"
     )
     public List<Vertex> getVertices(@LuaNotNil String textureID) {
+        lods = null;
+        packedVertices = null;
+        verticesExposed = true;
         int index = -1;
         for (int i = 0; i < textures.size(); i++) {
             if (textureID.equals(textures.get(i).name)) {
@@ -1412,6 +1544,9 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     @LuaWhitelist
     @LuaMethodDoc("model_part.get_all_vertices")
     public Map<String, List<Vertex>> getAllVertices() {
+        lods = null;
+        packedVertices = null;
+        verticesExposed = true;
         Map<String, List<Vertex>> map = new HashMap<>();
         for (int i = 0; i < textures.size(); i++) {
             List<Vertex> list = vertices.get(i);
@@ -1440,6 +1575,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         if(part.childCache.get(this.name) == null)
             part.childCache.put(this.name, this);
         this.parent = part;
+        structureChanged();
 
         if (this.parentType.isSeparate)
             owner.renderer.sortParts();
@@ -1469,6 +1605,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         if(this.childCache.get(part.name) == null)
             this.childCache.put(part.name, part);
         part.parent = this;
+        structureChanged();
 
         if (part.parentType.isSeparate)
             owner.renderer.sortParts();
@@ -1489,6 +1626,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             this.children.remove(part);
             this.childCache.remove(part.name);
             part.parent = null;
+            structureChanged();
 
             // Since any part arbitrarily down the tree could have a parent
             // type marked as separate, this is pretty much required.
@@ -1586,6 +1724,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             case "postRender" -> postRender = value;
             default -> throw new LuaError("Cannot assign value on key \"" + key + "\"");
         }
+        structureChanged();
     }
 
     @Override

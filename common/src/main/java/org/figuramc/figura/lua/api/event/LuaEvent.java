@@ -9,6 +9,7 @@ import org.figuramc.figura.lua.docs.LuaMetamethodDoc.LuaMetamethodOverload;
 import org.figuramc.figura.lua.docs.LuaMethodDoc;
 import org.figuramc.figura.lua.docs.LuaMethodOverload;
 import org.figuramc.figura.lua.docs.LuaTypeDoc;
+import org.luaj.vm2.LuaClosure;
 import org.luaj.vm2.LuaError;
 import org.luaj.vm2.LuaFunction;
 import org.luaj.vm2.LuaTable;
@@ -51,6 +52,24 @@ public class LuaEvent {
         for (LuaFunction function : queue)
             functions.addLast(function);
         queue.clear();
+    }
+
+    // if every function of this event (also the queued ones) is a lua function declaring at most this many parameters and no "...",
+    // so the arguments after them can't change what it does
+    public boolean allFunctionsTakeAtMost(int params) {
+        for (LuaFunction function : functions) {
+            if (!takesAtMost(function, params))
+                return false;
+        }
+        for (LuaFunction function : queue) {
+            if (!takesAtMost(function, params))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean takesAtMost(LuaFunction function, int params) {
+        return function instanceof LuaClosure closure && closure.p.is_vararg == 0 && closure.p.numparams <= params;
     }
 
     // Calls all the functions in the order they were registered, using the given args for all calls.

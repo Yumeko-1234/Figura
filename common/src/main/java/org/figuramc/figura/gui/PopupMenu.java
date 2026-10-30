@@ -14,11 +14,13 @@ import net.minecraft.network.chat.Style;
 import net.minecraft.world.entity.Entity;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.avatar.AvatarCulling;
 import org.figuramc.figura.avatar.AvatarManager;
 import org.figuramc.figura.avatar.Badges;
 import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.math.vector.FiguraVec3;
 import org.figuramc.figura.math.vector.FiguraVec4;
+import org.figuramc.figura.model.FiguraModelPartReader;
 import org.figuramc.figura.permissions.PermissionManager;
 import org.figuramc.figura.permissions.PermissionPack;
 import org.figuramc.figura.utils.FiguraIdentifier;
@@ -63,6 +65,27 @@ public class PopupMenu {
                 PermissionPack pack = PermissionManager.get(id);
                 if (PermissionManager.decreaseCategory(pack))
                     FiguraToast.sendToast(FiguraText.of("toast.permission_change"), pack.getCategoryName());
+            }),
+            Pair.of(FiguraText.of("popup_menu.focus"), id -> {
+                // focus mode only hides the other avatars, permissions are never changed
+                // on yourself (your avatar is never hidden) it clears every focused player instead
+                if (id.equals(FiguraMod.getLocalPlayerUUID())) {
+                    AvatarCulling.toggleFocus(null);
+                    FiguraToast.sendToast(FiguraText.of("toast.focus_cleared"));
+                    return;
+                }
+                boolean on = AvatarCulling.toggleFocus(id);
+                FiguraToast.sendToast(FiguraText.of(on ? "toast.focus_on" : "toast.focus_off"));
+            }),
+            Pair.of(FiguraText.of("popup_menu.full_detail"), id -> {
+                // only the detail reductions are turned off, culling and script throttling still apply
+                Avatar avatar = AvatarManager.getAvatarForPlayer(id);
+                boolean wasReduced = avatar != null && FiguraModelPartReader.getLodCell(avatar) > 0f;
+                boolean on = AvatarCulling.toggleFullDetail(id);
+                // Body Detail Reduction is applied when the model loads, so the avatar is reloaded when that changes
+                if (avatar != null && wasReduced != FiguraModelPartReader.getLodCell(avatar) > 0f)
+                    AvatarManager.reloadAvatar(id);
+                FiguraToast.sendToast(FiguraText.of(on ? "toast.full_detail_on" : "toast.full_detail_off"));
             })
     );
     private static final int LENGTH = BUTTONS.size();

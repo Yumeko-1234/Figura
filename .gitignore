@@ -46,4 +46,4 @@ remappedSrc/
 forge*changelog.txt
 
 # Used for testing against other mods
-libs/*
+libs/*.architectury-transformer/

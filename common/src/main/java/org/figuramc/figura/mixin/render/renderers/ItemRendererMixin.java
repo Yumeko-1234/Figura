@@ -30,8 +30,8 @@ public abstract class ItemRendererMixin {
         if (livingEntity == null || itemStack.isEmpty())
             return;
 
-        Avatar avatar = AvatarManager.getAvatar(livingEntity);
-        if (avatar == null)
+        Avatar avatar = AvatarManager.getAvatarForRender(livingEntity);
+        if (avatar == null || !avatar.hasListeners("ITEM_RENDER"))
             return;
 
         BakedModel bakedModel = this.getModel(itemStack, world, livingEntity, seed);

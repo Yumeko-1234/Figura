@@ -38,7 +38,7 @@ public abstract class ItemInHandRendererMixin {
 
     @Inject(method = "renderHandsWithItems", at = @At("HEAD"))
     private void onRenderHandsWithItems(float tickDelta, PoseStack matrices, MultiBufferSource.BufferSource vertexConsumers, LocalPlayer player, int light, CallbackInfo ci) {
-        avatar = AvatarManager.getAvatarForPlayer(player.getUUID());
+        avatar = AvatarManager.getAvatarToRender(player.getUUID());
         if (avatar == null)
             return;
 
@@ -46,7 +46,7 @@ public abstract class ItemInHandRendererMixin {
         FiguraMod.pushProfiler(avatar);
         FiguraMod.pushProfiler("renderEvent");
         avatar.renderMode = EntityRenderMode.FIRST_PERSON;
-        avatar.renderEvent(tickDelta, new FiguraMat4().set(matrices.last().pose()));
+        avatar.renderEvent(tickDelta, avatar.hasListeners("RENDER") ? new FiguraMat4().set(matrices.last().pose()) : null);
         FiguraMod.popProfiler(3);
     }
 
@@ -58,7 +58,7 @@ public abstract class ItemInHandRendererMixin {
         FiguraMod.pushProfiler(FiguraMod.MOD_ID);
         FiguraMod.pushProfiler(avatar);
         FiguraMod.pushProfiler("postRenderEvent");
-        avatar.postRenderEvent(tickDelta, new FiguraMat4().set(matrices.last().pose()));
+        avatar.postRenderEvent(tickDelta, avatar.hasListeners("POST_RENDER") ? new FiguraMat4().set(matrices.last().pose()) : null);
         avatar = null;
         FiguraMod.popProfiler(3);
     }

@@ -32,6 +32,7 @@ import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.animation.Animation;
 import org.figuramc.figura.animation.AnimationPlayer;
 import org.figuramc.figura.backend2.NetworkStuff;
+import org.figuramc.figura.compat.IrisCompat;
 import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.lua.FiguraLuaPrinter;
 import org.figuramc.figura.lua.FiguraLuaRuntime;
@@ -40,6 +41,7 @@ import org.figuramc.figura.lua.api.data.FiguraBuffer;
 import org.figuramc.figura.lua.api.data.FiguraInputStream;
 import org.figuramc.figura.lua.api.data.FiguraOutputStream;
 import org.figuramc.figura.lua.api.entity.EntityAPI;
+import org.figuramc.figura.lua.api.event.LuaEvent;
 import org.figuramc.figura.lua.api.particle.ParticleAPI;
 import org.figuramc.figura.lua.api.ping.PingArg;
 import org.figuramc.figura.lua.api.ping.PingFunction;
@@ -95,6 +97,9 @@ public class Avatar {
     public final EntityType<?> entityType;
     public CompoundTag nbt;
     public boolean loaded = true;
+    // second half of load() runs async; clean() must wait for it, or the renderer/runtime it creates leak
+    private CompletableFuture<Void> loadTask;
+    private volatile boolean cleaned;
     public final boolean isHost;
 
     //metadata
@@ -132,6 +137,32 @@ public class Avatar {
     public int lastPlayingSound = 0;
     public int versionStatus = 0;
 
+    // set every frame by AvatarCulling
+    // focusBlocked: another player is focused, culled: too far away or out of view
+    public boolean focusBlocked, culled;
+    // detail level for the avatar on its player, 0 is full detail, higher the further away it is
+    public int lodLevel;
+    // set every frame by AvatarCulling: the render scripts (render events and part render functions) are skipped this frame
+    public boolean renderScriptsSkipped;
+    // render script timing, used by AvatarCulling to throttle the expensive avatars more
+    // renderScriptNanos: time spent in render scripts since the last frame update, renderScriptCost: estimated nanoseconds of one frame of them
+    public long renderScriptNanos;
+    public double renderScriptCost;
+    // progress towards the next render script run, they run when it reaches 1, and if they ran on the last frame
+    public double renderScriptCredit;
+    public boolean renderScriptsRan;
+    // set every frame by AvatarCulling, for the players beyond the closest Full Rate Players
+    // redrawThrottled: the model pass keeps what it draws, redrawSkipped: it draws the kept frame again instead of walking the model
+    public boolean redrawThrottled, redrawSkipped;
+    // same as above, for the tick scripts (tick and world tick events), set every tick by AvatarCulling
+    // tickScriptNanos: time the last tick of scripts took, -1 when they did not run since the last update, tickScriptCost: estimated nanoseconds of one tick of them
+    public boolean tickScriptsSkipped;
+    public long tickScriptNanos = -1;
+    public double tickScriptCost;
+    public double tickScriptCredit;
+    // if the animations were applied this frame, so they need to be cleared
+    private boolean animationsApplied;
+
     // limits
     public int animationComplexity;
     public final Instructions complexity;
@@ -142,6 +173,9 @@ public class Avatar {
         this.owner = owner;
         this.entityType = type;
         this.isHost = type == EntityType.PLAYER && FiguraMod.isLocal(owner);
+        // a different start per player, so throttled avatars with the same interval run on different frames
+        this.renderScriptCredit = Math.floorMod(owner.hashCode(), 1024) / 1024d;
+        this.tickScriptCredit = this.renderScriptCredit;
         this.permissions = type == EntityType.PLAYER ? PermissionManager.get(owner) : PermissionManager.getMobPermissions(owner);
         this.complexity = new Instructions(permissions.get(Permissions.COMPLEXITY));
         this.init = new Instructions(permissions.get(Permissions.INIT_INST));
@@ -188,7 +222,12 @@ public class Avatar {
             return;
         }
 
-        tasks.thenRun(() -> {
+        loadTask = tasks.thenRun(() -> {
+            if (cleaned) {
+                loaded = true;
+                return;
+            }
+
             try {
                 // metadata
                 CompoundTag metadata = nbt.getCompound("metadata");
@@ -227,7 +266,7 @@ public class Avatar {
                 createLuaRuntime();
             } catch (Exception e) {
                 FiguraMod.LOGGER.error("", e);
-                clean();
+                cleanResources();
                 this.nbt = null;
                 this.renderer = null;
                 this.luaRuntime = null;
@@ -238,6 +277,12 @@ public class Avatar {
     }
 
     public void tick() {
+        tickPrepare();
+        tickScripts();
+    }
+
+    // the per tick bookkeeping, always done on the tick itself
+    public void tickPrepare() {
         if (scriptError || luaRuntime == null || !loaded)
             return;
 
@@ -268,17 +313,35 @@ public class Avatar {
         // particles
         soundsRemaining.set(permissions.get(Permissions.SOUNDS));
         soundsRemaining.tick();
+    }
 
-        // call events
+    // the tick events, may run on a later frame of the same tick (see AvatarManager.runDeferredTicks)
+    public void tickScripts() {
+        if (scriptError || luaRuntime == null || !loaded)
+            return;
+
+        // call events, timed for the tick script budget
+        long start = System.nanoTime();
         FiguraMod.pushProfiler("worldTick");
         worldTick.reset(permissions.get(Permissions.WORLD_TICK_INST));
-        run("WORLD_TICK", worldTick);
+        runListened("WORLD_TICK", worldTick);
 
         FiguraMod.popPushProfiler("tick");
         tick.reset(permissions.get(Permissions.TICK_INST));
         tickEvent();
 
         FiguraMod.popProfiler();
+        tickScriptNanos = System.nanoTime() - start;
+    }
+
+    // tick of an avatar skipped by AvatarCulling: no tick events, but pings and the init script still run
+    // so the avatar state stays in sync and nothing piles up for when it comes back
+    public void tickSkipped() {
+        if (scriptError || luaRuntime == null || !loaded)
+            return;
+
+        tick.reset(permissions.get(Permissions.TICK_INST));
+        flushQueuedEvents();
     }
 
     public void render(float delta) {
@@ -290,12 +353,17 @@ public class Avatar {
 
         complexity.reset(permissions.get(Permissions.COMPLEXITY));
 
-        if (scriptError || luaRuntime == null || !loaded)
+        if (scriptError || luaRuntime == null || !loaded || isRenderSkipped())
             return;
 
         render.reset(permissions.get(Permissions.RENDER_INST));
         worldRender.reset(permissions.get(Permissions.WORLD_RENDER_INST));
-        run("WORLD_RENDER", worldRender, delta);
+        if (!renderScriptsSkipped)
+            runListened("WORLD_RENDER", worldRender, delta);
+    }
+
+    public boolean isRenderSkipped() {
+        return focusBlocked || culled;
     }
 
     public void runPing(int id, byte[] data) {
@@ -339,14 +407,36 @@ public class Avatar {
         if (scriptError || luaRuntime == null || !loaded)
             return null;
 
-        // run event
+        // run event, timing the render scripts
+        boolean timed = limit == render || limit == worldRender;
+        long start = timed ? System.nanoTime() : 0L;
         Varargs ret = luaRuntime.run(toRun, limit, args);
+        if (timed)
+            renderScriptNanos += System.nanoTime() - start;
 
         // stuff that this run produced
         flushQueuedEvents();
 
         // return
         return ret;
+    }
+
+    // whether the script registered any function to this event, so callers can skip building its arguments
+    public boolean hasListeners(String event) {
+        if (scriptError || luaRuntime == null || !loaded || luaRuntime.events == null)
+            return false;
+        LuaEvent luaEvent = luaRuntime.events.getEvents().get(event);
+        return luaEvent != null && luaEvent.__len() > 0;
+    }
+
+    // same as run, but an event without listeners only flushes the queued events instead of converting the args and calling into lua
+    @Nullable
+    private Varargs runListened(String event, Instructions limit, Object... args) {
+        if (!hasListeners(event)) {
+            flushQueuedEvents();
+            return null;
+        }
+        return run(event, limit, args);
     }
 
     public void punish(int amount) {
@@ -368,17 +458,113 @@ public class Avatar {
 
     public void tickEvent() {
         if (loaded && luaRuntime != null && luaRuntime.getUser() != null)
-            run("TICK", tick);
+            runListened("TICK", tick);
+    }
+
+    // render scripts skipped this frame, only for the player in the world (gui, first person and others always run)
+    // also skipped in the normal pass when the shadow pass already ran them this frame
+    private boolean isRenderEventSkipped() {
+        return (renderScriptsSkipped && renderMode == EntityRenderMode.RENDER) || reuseShadowScripts;
+    }
+
+    // -- render scripts shared with the shadow pass -- //
+    // with a shader pack, Iris draws every entity twice a frame: first into the shadow map, then in the normal pass
+    // both passes have the same frame and delta, so the render scripts run once, in the shadow pass, and the normal pass draws what they set
+    // the shadow pass shows the scripts the normal "RENDER" context (instead of "OTHER"), so they set what the normal pass would
+    // only for avatars whose render events can't see the pose matrix, the one argument that differs between the passes
+
+    private static long levelFrame;
+    // the frame the shadow pass ran this avatar's render scripts in
+    private long shadowScriptsFrame = -1;
+    // for the entity render going on, set by the render event
+    private boolean shadowLeadPass, reuseShadowScripts, compareShadowScripts;
+    private boolean shadowNotSharedLogged, shadowMismatchLogged;
+    private PartStateSnapshot shadowSnapshot, normalSnapshot;
+
+    // called once per frame, before the shadow pass
+    public static void beginLevelFrame() {
+        levelFrame++;
+    }
+
+    public static long getLevelFrame() {
+        return levelFrame;
+    }
+
+    // the context given to the render scripts
+    public String scriptContext() {
+        return shadowLeadPass ? EntityRenderMode.RENDER.name() : renderMode.name();
+    }
+
+    // if the part render functions are skipped this pass, since the shadow pass already ran them
+    public boolean reusesShadowScripts() {
+        return reuseShadowScripts;
+    }
+
+    private void updateShadowScriptSharing() {
+        shadowLeadPass = reuseShadowScripts = compareShadowScripts = false;
+        if (Configs.SHARE_SHADOW_PASS_SCRIPTS == null || !Configs.SHARE_SHADOW_PASS_SCRIPTS.value || !loaded || luaRuntime == null || renderer == null)
+            return;
+
+        // the shadow pass draws entities without going through the normal entity render, so their render mode is still OTHER
+        if (renderMode == EntityRenderMode.OTHER && IrisCompat.isShadowPass()) {
+            shadowLeadPass = canShareShadowScripts();
+        } else if (renderMode == EntityRenderMode.RENDER && shadowScriptsFrame == levelFrame) {
+            // verifyOptimizations runs them again instead, to check that it would have been the same
+            if (FiguraMod.verifyOptimizations())
+                compareShadowScripts = true;
+            else
+                reuseShadowScripts = true;
+        }
+    }
+
+    // the render events get (delta, context, matrix), so listeners declaring at most 2 parameters (and no "...") never see the matrix
+    // part render functions get (delta, context, part), which are the same in both passes
+    private boolean canShareShadowScripts() {
+        Map<String, LuaEvent> events = luaRuntime.events == null ? null : luaRuntime.events.getEvents();
+        LuaEvent renderEvent = events == null ? null : events.get("RENDER");
+        LuaEvent postRenderEvent = events == null ? null : events.get("POST_RENDER");
+        boolean shared = (renderEvent == null || renderEvent.allFunctionsTakeAtMost(2))
+                && (postRenderEvent == null || postRenderEvent.allFunctionsTakeAtMost(2));
+        if (!shared && !shadowNotSharedLogged && FiguraMod.debugModeEnabled()) {
+            shadowNotSharedLogged = true;
+            FiguraMod.debug("{}: render scripts are not shared with the shadow pass, a render event listener may read the pose matrix", entityName);
+        }
+        return shared;
+    }
+
+    // after the post render event: remember that the shadow pass ran the scripts, and with verifyOptimizations compare the two passes
+    private void finishShadowScriptSharing() {
+        if (shadowLeadPass) {
+            shadowScriptsFrame = levelFrame;
+            if (FiguraMod.verifyOptimizations() && renderer != null && renderer.root != null) {
+                if (shadowSnapshot == null)
+                    shadowSnapshot = new PartStateSnapshot();
+                shadowSnapshot.take(renderer.root);
+            }
+        } else if (compareShadowScripts && shadowSnapshot != null && renderer != null && renderer.root != null) {
+            if (normalSnapshot == null)
+                normalSnapshot = new PartStateSnapshot();
+            normalSnapshot.take(renderer.root);
+            FiguraModelPart different = shadowSnapshot.firstDifference(normalSnapshot);
+            if (different != null && !shadowMismatchLogged) {
+                shadowMismatchLogged = true;
+                FiguraMod.LOGGER.warn("{}: reusing the shadow pass render scripts would change the part \"{}\" in the normal pass, its scripts depend on the pass or keep state between renders",
+                        entityName, different.name);
+            }
+        }
+        shadowLeadPass = reuseShadowScripts = compareShadowScripts = false;
     }
 
     public void renderEvent(float delta, FiguraMat4 poseMatrix) {
-        if (loaded && luaRuntime != null && luaRuntime.getUser() != null)
-            run("RENDER", render, delta, renderMode.name(), poseMatrix);
+        updateShadowScriptSharing();
+        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped())
+            runListened("RENDER", render, delta, scriptContext(), poseMatrix);
     }
 
     public void postRenderEvent(float delta, FiguraMat4 poseMatrix) {
-        if (loaded && luaRuntime != null && luaRuntime.getUser() != null)
-            run("POST_RENDER", render.post(), delta, renderMode.name(), poseMatrix);
+        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped())
+            runListened("POST_RENDER", render.post(), delta, scriptContext(), poseMatrix);
+        finishShadowScriptSharing();
         renderMode = EntityRenderMode.OTHER;
     }
 
@@ -389,30 +575,33 @@ public class Avatar {
         if (renderer != null)
             renderer.allowMatrixUpdate = false;
 
-        run("POST_WORLD_RENDER", worldRender.post(), delta);
+        if (isRenderSkipped() || renderScriptsSkipped)
+            return;
+
+        runListened("POST_WORLD_RENDER", worldRender.post(), delta);
     }
 
     public boolean skullRenderEvent(float delta, BlockStateAPI block, ItemStackAPI item, EntityAPI<?> entity, String mode) {
         Varargs result = null;
         if (loaded && renderer != null && renderer.interceptRendersIntoFigura)
-            result = run("SKULL_RENDER", render, delta, block, item, entity, mode);
+            result = runListened("SKULL_RENDER", render, delta, block, item, entity, mode);
         return isCancelled(result);
     }
 
     public boolean useItemEvent(ItemStackAPI stack, String type, int particleCount) {
-        Varargs result = loaded ? run("USE_ITEM", tick, stack, type, particleCount) : null;
+        Varargs result = loaded ? runListened("USE_ITEM", tick, stack, type, particleCount) : null;
         return isCancelled(result);
     }
 
     public boolean arrowRenderEvent(float delta, EntityAPI<?> arrow) {
         Varargs result = null;
-        if (loaded) result = run("ARROW_RENDER", render, delta, arrow);
+        if (loaded) result = runListened("ARROW_RENDER", render, delta, arrow);
         return isCancelled(result);
     }
 
     public boolean tridentRenderEvent(float delta, EntityAPI<?> trident) {
         Varargs result = null;
-        if (loaded) result = run("TRIDENT_RENDER", render, delta, trident);
+        if (loaded) result = runListened("TRIDENT_RENDER", render, delta, trident);
         return isCancelled(result);
     }
 
@@ -420,7 +609,7 @@ public class Avatar {
         if (!loaded || renderer == null || !renderer.interceptRendersIntoFigura) {
             return false;
         }
-        Varargs result = run("ITEM_RENDER", render, item, mode, pos, rot, scale, leftHanded);
+        Varargs result = runListened("ITEM_RENDER", render, item, mode, pos, rot, scale, leftHanded);
 
         if(result == null)
             return false;
@@ -435,7 +624,7 @@ public class Avatar {
 
     public boolean playSoundEvent(String id, FiguraVec3 pos, float vol, float pitch, boolean loop, String category, String file) {
         Varargs result = null;
-        if (loaded) result = run("ON_PLAY_SOUND", tick, id, pos, vol, pitch, loop, category, file);
+        if (loaded) result = runListened("ON_PLAY_SOUND", tick, id, pos, vol, pitch, loop, category, file);
         return isCancelled(result);
     }
 
@@ -915,9 +1104,11 @@ public class Avatar {
 
 
     public void applyAnimations() {
-        if (!loaded || scriptError)
+        animationsApplied = false;
+        if (!loaded || scriptError || isRenderSkipped())
             return;
 
+        animationsApplied = true;
         animation.reset(permissions.get(Permissions.ANIMATION_INST));
 
         int animationsLimit = permissions.get(Permissions.BB_ANIMATIONS);
@@ -934,7 +1125,7 @@ public class Avatar {
     }
 
     public void clearAnimations() {
-        if (!loaded || scriptError)
+        if (!loaded || scriptError || !animationsApplied)
             return;
 
         for (Animation animation : animations.values())
@@ -950,6 +1141,19 @@ public class Avatar {
      * also closes and stops this avatar sounds
      */
     public void clean() {
+        cleaned = true;
+
+        // load still running, free what it creates once it is done (on the client thread, textures touch the TextureManager)
+        CompletableFuture<Void> task = loadTask;
+        if (task != null && !task.isDone()) {
+            task.whenComplete((v, e) -> Minecraft.getInstance().execute(this::cleanResources));
+            return;
+        }
+
+        cleanResources();
+    }
+
+    private void cleanResources() {
         if (renderer != null)
             renderer.invalidate();
 

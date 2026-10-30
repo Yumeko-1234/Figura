@@ -62,7 +62,7 @@ public class NetworkStuff {
     private static int authCheck = RECONNECT;
 
     protected static HttpAPI api;
-    protected static WebSocket ws;
+    protected static volatile WebSocket ws;
 
     public static int backendStatus = 1;
     public static String disconnectedReason;
@@ -145,7 +145,12 @@ public class NetworkStuff {
             Request<WebSocket> request;
             while ((request = WS_REQUESTS.poll()) != null) {
                 Request<WebSocket> finalRequest = request;
-                async(() -> finalRequest.consumer.accept(ws));
+                async(() -> {
+                    // disconnected before it ran, subscriptions are sent again on the next connect
+                    WebSocket socket = ws;
+                    if (socket != null)
+                        finalRequest.consumer.accept(socket);
+                });
             }
         }
     }
@@ -211,6 +216,14 @@ public class NetworkStuff {
             responseDebug("motd", code, data);
             if (data != null) motd = Emojis.applyEmojis(TextUtils.tryParseJson(data));
         });
+    }
+
+    public static void scheduleReconnect(int ticks) {
+        authCheck = Math.min(authCheck, ticks);
+    }
+
+    public static boolean isCurrentWS(WebSocket socket) {
+        return socket != null && socket == ws;
     }
 
     public static void disconnect(String reason) {
@@ -302,8 +315,12 @@ public class NetworkStuff {
 
             //error
             if (code != 200) {
-                if (code == 404 && Configs.CONNECTION_TOASTS.value)
-                    FiguraToast.sendToast(FiguraText.of("backend.user_not_found"), FiguraToast.ToastType.ERROR);
+                if (code == 404) {
+                    if (Configs.CONNECTION_TOASTS.value)
+                        FiguraToast.sendToast(FiguraText.of("backend.user_not_found"), FiguraToast.ToastType.ERROR);
+                } else {
+                    AvatarManager.fetchFailed(user.id);
+                }
                 return;
             }
 
@@ -415,9 +432,12 @@ public class NetworkStuff {
             }
             responseDebug("getAvatar", code, s);
 
-            //on error
-            if (code != 200)
+            //on error, fetch the user again later unless the avatar is gone
+            if (code != 200) {
+                if (code != 404)
+                    AvatarManager.fetchFailed(target.id);
                 return;
+            }
 
             //success
             try {
@@ -462,6 +482,7 @@ public class NetworkStuff {
             ws.connect();
         } catch (WebSocketException e) {
             FiguraMod.LOGGER.error(e.getMessage());
+            scheduleReconnect(600);
         }
     }
 

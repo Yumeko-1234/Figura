@@ -12,7 +12,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.avatar.AvatarCulling;
 import org.figuramc.figura.avatar.AvatarManager;
+import org.figuramc.figura.compat.EpicFightPoseThrottle;
 import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.math.vector.FiguraVec4;
 import org.figuramc.figura.model.rendering.EntityRenderMode;
@@ -44,7 +46,7 @@ public abstract class LevelRendererMixin {
 
     @Inject(method = "renderEntity", at = @At("HEAD"))
     private void renderEntity(Entity entity, double cameraX, double cameraY, double cameraZ, float tickDelta, PoseStack matrices, MultiBufferSource bufferSource, CallbackInfo ci) {
-        Avatar avatar = AvatarManager.getAvatar(entity);
+        Avatar avatar = AvatarManager.getAvatarForRender(entity);
         if (avatar == null)
             return;
 
@@ -113,12 +115,21 @@ public abstract class LevelRendererMixin {
 
     @Inject(method = "renderLevel", at = @At("HEAD"))
     private void onRenderLevel(PoseStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        // before the Iris shadow pass, which is drawn later in renderLevel
+        Avatar.beginLevelFrame();
+
+        FiguraMod.pushProfiler(FiguraMod.MOD_ID);
+        FiguraMod.pushProfiler("avatarCulling");
+        AvatarCulling.update(matrices, matrix4f, camera);
+        FiguraMod.popProfiler(2);
+
         AvatarManager.executeAll("worldRender", avatar -> avatar.render(tickDelta));
     }
 
     @Inject(method = "renderLevel", at = @At("RETURN"))
     private void afterRenderLevel(PoseStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
         AvatarManager.executeAll("postWorldRender", avatar -> avatar.postWorldRenderEvent(tickDelta));
+        EpicFightPoseThrottle.endEntity();
     }
 
     @ModifyArg(method = "renderHitOutline", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;renderShape(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/phys/shapes/VoxelShape;DDDFFFF)V"), index = 6)

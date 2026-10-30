@@ -37,6 +37,8 @@ public class Animation {
 
     private final TimeController controller = new TimeController();
     public PlayState playState = PlayState.STOPPED;
+    // set when the player marked parts as animated, so clearing can skip animations that did nothing
+    protected boolean animatedParts = false;
     private float time = 0f;
     private boolean inverted = false;
     private float lastTime = 0f;
@@ -97,10 +99,17 @@ public class Animation {
                     stop();
             }
             case LOOP -> {
-                if (!inverted && time > length + loopDelay)
-                    time -= length + loopDelay - offset;
-                else if (inverted && time < offset - loopDelay)
-                    time += length + loopDelay - offset;
+                // after a long pause (eg. the avatar was culled) the time can be several loops away, so wrap it at once
+                float period = length + loopDelay - offset;
+                if (!inverted && time > length + loopDelay) {
+                    time -= period;
+                    if (period > 0 && time > length + loopDelay)
+                        time = offset + (time - offset) % period;
+                } else if (inverted && time < offset - loopDelay) {
+                    time += period;
+                    if (period > 0 && time < offset - loopDelay)
+                        time = length - (length - time) % period;
+                }
             }
             case HOLD -> {
                 time = inverted ? Math.max(time, offset) : Math.min(time, length);

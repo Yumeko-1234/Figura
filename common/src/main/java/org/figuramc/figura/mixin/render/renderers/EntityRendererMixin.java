@@ -36,7 +36,7 @@ public abstract class EntityRendererMixin<T extends Entity> implements EntityRen
 
     @Inject(at = @At("HEAD"), method = "shouldRender", cancellable = true)
     private void shouldRender(T entity, Frustum frustum, double d, double e, double f, CallbackInfoReturnable<Boolean> cir) {
-        Avatar avatar = AvatarManager.getAvatar(entity);
+        Avatar avatar = AvatarManager.getAvatarForRender(entity);
         if (avatar != null && avatar.permissions.get(Permissions.OFFSCREEN_RENDERING) == 1)
             cir.setReturnValue(true);
     }
@@ -56,7 +56,7 @@ public abstract class EntityRendererMixin<T extends Entity> implements EntityRen
 
     @Inject(at = @At(value = "HEAD"), method = "renderNameTag")
     private void setupAvatar(T entity, Component text, PoseStack matrices, MultiBufferSource vertexConsumers, int light, CallbackInfo ci) {
-        figura$avatar = AvatarManager.getAvatar(entity);
+        figura$avatar = AvatarManager.getAvatarForRender(entity);
         figura$custom = figura$avatar == null || figura$avatar.luaRuntime == null ? null : figura$avatar.luaRuntime.nameplate.ENTITY;
         figura$hasCustomNameplate = figura$custom != null && figura$avatar.permissions.get(Permissions.NAMEPLATE_EDIT) == 1;
         figura$enabled =  Configs.ENTITY_NAMEPLATE.value > 0 && !AvatarManager.panic && figura$hasCustomNameplate;

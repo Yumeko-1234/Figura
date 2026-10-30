@@ -4,6 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
 import net.minecraft.server.players.GameProfileCache;
+import net.minecraft.util.profiling.InactiveProfiler;
+import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.entity.Entity;
 import org.figuramc.figura.avatar.Avatar;
 import org.figuramc.figura.avatar.AvatarManager;
@@ -55,6 +57,14 @@ public class FiguraMod {
     @SuppressWarnings("all")
     public static boolean debugModeEnabled() {
         return Configs.DEBUG_MODE != null && Configs.DEBUG_MODE.value;
+    }
+
+    // -Dfigura.verifyOptimizations=true: the performance optimizations also do the work the old way and log the first difference
+    // separate from debug mode, since checking makes every optimized path slower than the original
+    private static final boolean VERIFY_OPTIMIZATIONS = Boolean.getBoolean("figura.verifyOptimizations");
+
+    public static boolean verifyOptimizations() {
+        return VERIFY_OPTIMIZATIONS;
     }
 
     public static void onClientInit() {
@@ -170,8 +180,16 @@ public class FiguraMod {
         Minecraft.getInstance().getProfiler().push(name);
     }
 
+    // whether the vanilla profiler records anything (debug pie chart or a metrics recording), so labels are only built when they are used
+    public static boolean isProfilerActive() {
+        return Minecraft.getInstance().getProfiler() != InactiveProfiler.INSTANCE;
+    }
+
     public static void pushProfiler(Avatar avatar) {
-        Minecraft.getInstance().getProfiler().push(avatar.entityName.isBlank() ? avatar.owner.toString() : avatar.entityName);
+        // pushing to the inactive profiler does nothing, and the pops are no-ops too, so skipping it keeps them balanced
+        ProfilerFiller profiler = Minecraft.getInstance().getProfiler();
+        if (profiler != InactiveProfiler.INSTANCE)
+            profiler.push(avatar.entityName.isBlank() ? avatar.owner.toString() : avatar.entityName);
     }
 
     public static void popPushProfiler(String name) {

@@ -54,7 +54,7 @@ public abstract class CustomHeadLayerMixin<T extends LivingEntity, M extends Ent
         if (itemStack.getItem() instanceof ArmorItem armorItem && armorItem.getEquipmentSlot() == EquipmentSlot.HEAD)
             return;
 
-        Avatar avatar = AvatarManager.getAvatar(livingEntity);
+        Avatar avatar = AvatarManager.getAvatarForRender(livingEntity);
         if (!RenderUtils.vanillaModel(avatar))
             return;
 

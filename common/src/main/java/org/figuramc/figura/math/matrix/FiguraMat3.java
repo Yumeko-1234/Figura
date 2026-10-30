@@ -214,6 +214,27 @@ public class FiguraMat3 extends FiguraMatrix<FiguraMat3, FiguraVec3> {
         return this;
     }
 
+    // this = a * b, the same result as a.rightMultiply(b) without copying a first
+    public FiguraMat3 setProduct(FiguraMat3 a, FiguraMat3 b) {
+        double nv11 = a.v11 * b.v11 + a.v12 * b.v21 + a.v13 * b.v31;
+        double nv12 = a.v11 * b.v12 + a.v12 * b.v22 + a.v13 * b.v32;
+        double nv13 = a.v11 * b.v13 + a.v12 * b.v23 + a.v13 * b.v33;
+
+        double nv21 = a.v21 * b.v11 + a.v22 * b.v21 + a.v23 * b.v31;
+        double nv22 = a.v21 * b.v12 + a.v22 * b.v22 + a.v23 * b.v32;
+        double nv23 = a.v21 * b.v13 + a.v22 * b.v23 + a.v23 * b.v33;
+
+        double nv31 = a.v31 * b.v11 + a.v32 * b.v21 + a.v33 * b.v31;
+        double nv32 = a.v31 * b.v12 + a.v32 * b.v22 + a.v33 * b.v32;
+        double nv33 = a.v31 * b.v13 + a.v32 * b.v23 + a.v33 * b.v33;
+
+        v11 = nv11; v12 = nv12; v13 = nv13;
+        v21 = nv21; v22 = nv22; v23 = nv23;
+        v31 = nv31; v32 = nv32; v33 = nv33;
+        invalidate();
+        return this;
+    }
+
     @Override
     @LuaWhitelist
     @LuaMethodDoc(

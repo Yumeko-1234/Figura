@@ -1,6 +1,7 @@
 package org.figuramc.figura.lua;
 
 import net.minecraft.network.chat.Component;
+import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.lua.docs.FiguraDocsManager;
 import org.figuramc.figura.lua.docs.LuaTypeDoc;
 import org.luaj.vm2.*;
@@ -20,6 +21,10 @@ import static org.luaj.vm2.LuaValue.*;
 public class LuaTypeManager {
 
     private final Map<Class<?>, LuaTable> metatables = new HashMap<>();
+    // classes that javaToLua wraps as userdata (none of the types it converts first), with their metatable
+    // what javaToLua does only depends on the class, so the next value of that class goes straight to the userdata
+    private final Map<Class<?>, LuaTable> wrapCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static boolean wrapMismatchLogged;
 
     public void generateMetatableFor(Class<?> clazz) {
         if (metatables.containsKey(clazz))
@@ -92,6 +97,8 @@ public class LuaTypeManager {
         }
 
         metatables.put(clazz, metatable);
+        // a new metatable can change which metatable a subclass gets
+        wrapCache.clear();
     }
 
     public void dumpMetatables(LuaTable table) {
@@ -123,7 +130,48 @@ public class LuaTypeManager {
         return result;
     }
 
+    // how each parameter is read from lua, worked out once per method instead of from the type name on every call
+    private static final int ARG_DOUBLE = 0, ARG_STRING = 1, ARG_BOOLEAN = 2, ARG_FLOAT = 3, ARG_INT = 4, ARG_LONG = 5,
+            ARG_TABLE = 6, ARG_FUNCTION = 7, ARG_VALUE = 8, ARG_OBJECT = 9, ARG_ARRAY = 10, ARG_USERDATA = 11;
+
+    private static int argKind(Class<?> type) {
+        return switch (type.getName()) {
+            case "java.lang.Number", "java.lang.Double", "double" -> ARG_DOUBLE;
+            case "java.lang.String" -> ARG_STRING;
+            case "java.lang.Boolean", "boolean" -> ARG_BOOLEAN;
+            case "java.lang.Float", "float" -> ARG_FLOAT;
+            case "java.lang.Integer", "int" -> ARG_INT;
+            case "java.lang.Long", "long" -> ARG_LONG;
+            case "org.luaj.vm2.LuaTable" -> ARG_TABLE;
+            case "org.luaj.vm2.LuaFunction" -> ARG_FUNCTION;
+            case "org.luaj.vm2.LuaValue" -> ARG_VALUE;
+            case "java.lang.Object" -> ARG_OBJECT;
+            default -> type.getName().startsWith("[") ? ARG_ARRAY : ARG_USERDATA;
+        };
+    }
+
+    // the value given for a missing or nil argument
+    private static Object missingArg(Class<?> type) {
+        return switch (type.getName()) {
+            case "double" -> 0D;
+            case "int" -> 0;
+            case "long" -> 0L;
+            case "float" -> 0f;
+            case "boolean" -> false;
+            default -> null;
+        };
+    }
+
+    private static boolean argMismatchLogged;
+
     public VarArgFunction getWrapper(Method method) {
+        // a public method of a public class passes the access check anyway, so it is skipped on every call
+        if (Modifier.isPublic(method.getModifiers()) && Modifier.isPublic(method.getDeclaringClass().getModifiers())) {
+            try {
+                method.setAccessible(true);
+            } catch (RuntimeException ignored) {}
+        }
+
         return new VarArgFunction() {
 
             private final boolean isStatic = Modifier.isStatic(method.getModifiers());
@@ -134,6 +182,10 @@ public class LuaTypeManager {
             private final Class<?>[] argumentTypes = method.getParameterTypes();
             private final Object[] actualArgs = new Object[argumentTypes.length];
             private final boolean[] requiredNotNil = getRequiredNotNil(method);
+            private final int[] argKinds = Arrays.stream(argumentTypes).mapToInt(LuaTypeManager::argKind).toArray();
+            private final Object[] missingArgs = Arrays.stream(argumentTypes).map(LuaTypeManager::missingArg).toArray();
+            // a direct call instead of reflection, null when the method keeps using reflection
+            private LuaDirectInvokers.Invoker direct = LuaDirectInvokers.get(method);
 
             @Override
             public Varargs invoke(Varargs args) {
@@ -178,26 +230,32 @@ public class LuaTypeManager {
                 int offset = isStatic && argumentTypes.length > 0 && !argumentTypes[0].isAssignableFrom(clazz) && args.isuserdata(1) && clazz.isAssignableFrom(args.checkuserdata(1).getClass()) ? 1 : 0;
 
                 // Fill in actualArgs from args
+                // (each argument is read from the varargs once, args.checkX(i) is the same as args.arg(i).checkX())
+                int narg = args.narg();
                 for (int i = 0; i < argumentTypes.length; i++) {
                     int argIndex = i + (isStatic ? 1 : 2) + offset;
-                    boolean nil = args.isnil(argIndex);
+                    LuaValue arg = args.arg(argIndex);
+                    boolean nil = arg.isnil();
                     if (nil && requiredNotNil[i])
                         throw new LuaError("bad argument: " + method.getName() + " " + argIndex + " do not allow nil values, expected " + FiguraDocsManager.getNameFor(argumentTypes[i]));
-                    if (argIndex <= args.narg() && !nil) {
+                    if (argIndex <= narg && !nil) {
                         try {
-                            actualArgs[i] = switch (argumentTypes[i].getName()) {
-                                case "java.lang.Number", "java.lang.Double", "double" -> args.checkdouble(argIndex);
-                                case "java.lang.String" -> args.checkjstring(argIndex);
-                                case "java.lang.Boolean", "boolean" -> args.toboolean(argIndex);
-                                case "java.lang.Float", "float" -> (float) args.checkdouble(argIndex);
-                                case "java.lang.Integer", "int" -> args.checkint(argIndex);
-                                case "java.lang.Long", "long" -> args.checklong(argIndex);
-                                case "org.luaj.vm2.LuaTable" -> args.checktable(argIndex);
-                                case "org.luaj.vm2.LuaFunction" -> args.checkfunction(argIndex);
-                                case "org.luaj.vm2.LuaValue" -> args.arg(argIndex);
-                                case "java.lang.Object" -> luaToJava(args.arg(argIndex));
-                                default -> argumentTypes[i].getName().startsWith("[") ? luaVarargToJava(args, argIndex, argumentTypes[i]) : args.checkuserdata(argIndex, argumentTypes[i]);
+                            actualArgs[i] = switch (argKinds[i]) {
+                                case ARG_DOUBLE -> arg.checkdouble();
+                                case ARG_STRING -> arg.checkjstring();
+                                case ARG_BOOLEAN -> arg.toboolean();
+                                case ARG_FLOAT -> (float) arg.checkdouble();
+                                case ARG_INT -> arg.checkint();
+                                case ARG_LONG -> arg.checklong();
+                                case ARG_TABLE -> arg.checktable();
+                                case ARG_FUNCTION -> arg.checkfunction();
+                                case ARG_VALUE -> arg;
+                                case ARG_OBJECT -> luaToJava(arg);
+                                case ARG_ARRAY -> luaVarargToJava(args, argIndex, argumentTypes[i]);
+                                default -> arg.checkuserdata(argumentTypes[i]);
                             };
+                            if (FiguraMod.verifyOptimizations())
+                                verifyArg(actualArgs[i], args, argIndex, argumentTypes[i]);
                         } catch (LuaError err) {
                             String expectedType = FiguraDocsManager.getNameFor(argumentTypes[i]);
                             String actualType;
@@ -208,27 +266,42 @@ public class LuaTypeManager {
                             throw new LuaError("Invalid argument " + argIndex + " to function " + method.getName() + ". Expected " + expectedType + ", but got " + actualType);
                         }
                     } else {
-                        actualArgs[i] = switch (argumentTypes[i].getName()) {
-                            case "double" -> 0D;
-                            case "int" -> 0;
-                            case "long" -> 0L;
-                            case "float" -> 0f;
-                            case "boolean" -> false;
-                            default -> null;
-                        };
+                        actualArgs[i] = missingArgs[i];
                     }
                 }
 
                 // Invoke the wrapped method
                 Object result;
-                try {
-                    result = method.invoke(caller, actualArgs);
-                } catch (IllegalAccessException | InvocationTargetException e) {
-                    throw e.getCause() instanceof LuaError l ? l : new LuaError(e.getCause());
+                LuaDirectInvokers.Invoker invoker = direct;
+                if (invoker != null) {
+                    try {
+                        result = invoker.invoke(caller, actualArgs);
+                    } catch (LuaError l) {
+                        throw l;
+                    } catch (LinkageError | ClassCastException e) {
+                        // thrown by the generated call itself (before the method ran): use reflection for this method from now on
+                        if (!thrownBy(e, invoker, getClass())) throw new LuaError(e);
+                        direct = null;
+                        logDirectCallFailure(method, e);
+                        result = invokeReflectively();
+                    } catch (Throwable t) {
+                        // the same as reflection: anything thrown by the method becomes a lua error
+                        throw new LuaError(t);
+                    }
+                } else {
+                    result = invokeReflectively();
                 }
 
                 // Convert the return value
                 return result instanceof Varargs v ? v : javaToLua(result);
+            }
+
+            private Object invokeReflectively() {
+                try {
+                    return method.invoke(caller, actualArgs);
+                } catch (IllegalAccessException | InvocationTargetException e) {
+                    throw e.getCause() instanceof LuaError l ? l : new LuaError(e.getCause());
+                }
             }
 
             @Override
@@ -236,6 +309,52 @@ public class LuaTypeManager {
                 return "function: " + method.getName();
             }
         };
+    }
+
+    // if the error comes from the generated call class itself, not from the method it calls
+    // the generated class is hidden, so its frame is usually left out of stack traces and the wrapper calling it is on top instead
+    // (an error from inside the method always has a frame of that method on top)
+    private static boolean thrownBy(Throwable e, LuaDirectInvokers.Invoker invoker, Class<?> wrapper) {
+        StackTraceElement[] trace = e.getStackTrace();
+        if (trace.length == 0)
+            return false;
+        String top = trace[0].getClassName();
+        return top.equals(invoker.getClass().getName()) || top.equals(wrapper.getName());
+    }
+
+    private static boolean directCallFailureLogged;
+
+    private static void logDirectCallFailure(Method method, Throwable e) {
+        if (directCallFailureLogged)
+            return;
+        directCallFailureLogged = true;
+        FiguraMod.LOGGER.warn("Direct call of the lua api method {}.{} failed, it uses reflection from now on, please report this",
+                method.getDeclaringClass().getName(), method.getName(), e);
+    }
+
+    // verifyOptimizations: reads the argument again the way it was read before (by type name) and reports the first difference
+    private void verifyArg(Object value, Varargs args, int argIndex, Class<?> type) {
+        Object expected = switch (type.getName()) {
+            case "java.lang.Number", "java.lang.Double", "double" -> args.checkdouble(argIndex);
+            case "java.lang.String" -> args.checkjstring(argIndex);
+            case "java.lang.Boolean", "boolean" -> args.toboolean(argIndex);
+            case "java.lang.Float", "float" -> (float) args.checkdouble(argIndex);
+            case "java.lang.Integer", "int" -> args.checkint(argIndex);
+            case "java.lang.Long", "long" -> args.checklong(argIndex);
+            case "org.luaj.vm2.LuaTable" -> args.checktable(argIndex);
+            case "org.luaj.vm2.LuaFunction" -> args.checkfunction(argIndex);
+            case "org.luaj.vm2.LuaValue" -> args.arg(argIndex);
+            case "java.lang.Object" -> luaToJava(args.arg(argIndex));
+            default -> type.getName().startsWith("[") ? luaVarargToJava(args, argIndex, type) : args.checkuserdata(argIndex, type);
+        };
+        // same class and value (arrays by content, they are made new on every read)
+        boolean same = value == expected || (value != null && expected != null && value.getClass() == expected.getClass()
+                && (value.getClass().isArray() ? Arrays.deepEquals(new Object[] {value}, new Object[] {expected}) : value.equals(expected)));
+        if (!same && !argMismatchLogged) {
+            argMismatchLogged = true;
+            FiguraMod.LOGGER.warn("Lua argument {} read as {} ({}) instead of {} ({}) for a {} parameter, please report this",
+                    argIndex, value, value == null ? null : value.getClass().getName(), expected, expected == null ? null : expected.getClass().getName(), type.getName());
+        }
     }
 
     private LuaValue wrap(Object instance) {
@@ -248,6 +367,7 @@ public class LuaTypeManager {
             metatable = metatables.get(clazz);
         }
 
+        wrapCache.put(instance.getClass(), metatable);
         LuaUserdata result = new LuaUserdata(instance);
         result.setmetatable(metatable);
         return result;
@@ -337,7 +457,30 @@ public class LuaTypeManager {
     public Varargs javaToLua(Object val) {
         if (val == null)
             return LuaValue.NIL;
-        else if (val instanceof LuaValue l)
+
+        LuaTable cached = wrapCache.get(val.getClass());
+        if (cached != null) {
+            LuaUserdata result = new LuaUserdata(val, cached);
+            if (FiguraMod.verifyOptimizations())
+                verifyWrap(val, result);
+            return result;
+        }
+
+        return convertToLua(val);
+    }
+
+    // verifyOptimizations: converts the value again without the cache and reports the first difference
+    private void verifyWrap(Object val, LuaUserdata cached) {
+        Varargs expected = convertToLua(val);
+        boolean same = expected instanceof LuaUserdata u && u.m_instance == val && u.getmetatable() == cached.getmetatable();
+        if (!same && !wrapMismatchLogged) {
+            wrapMismatchLogged = true;
+            FiguraMod.LOGGER.warn("Cached lua conversion of a {} differs from the normal one, please report this", val.getClass().getName());
+        }
+    }
+
+    private Varargs convertToLua(Object val) {
+        if (val instanceof LuaValue l)
             return l;
         else if (val instanceof Double d)
             return LuaValue.valueOf(d);

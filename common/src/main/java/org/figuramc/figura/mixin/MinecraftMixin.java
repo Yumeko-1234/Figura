@@ -138,7 +138,13 @@ public abstract class MinecraftMixin {
 
     @Inject(at = @At("HEAD"), method = "runTick")
     private void preTick(boolean tick, CallbackInfo ci) {
+        AvatarManager.runDeferredTicks();
         AvatarManager.executeAll("applyBBAnimations", Avatar::applyAnimations);
+    }
+
+    @Inject(at = @At("HEAD"), method = "tick")
+    private void beforeTick(CallbackInfo ci) {
+        AvatarManager.flushDeferredTicks();
     }
 
     @Inject(at = @At("RETURN"), method = "runTick")

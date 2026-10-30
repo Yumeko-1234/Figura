@@ -260,6 +260,36 @@ public class FiguraMat4 extends FiguraMatrix<FiguraMat4, FiguraVec4> {
         return this;
     }
 
+    // this = a * b, the same result as a.rightMultiply(b) without copying a first
+    public FiguraMat4 setProduct(FiguraMat4 a, FiguraMat4 b) {
+        double nv11 = a.v11 * b.v11 + a.v12 * b.v21 + a.v13 * b.v31 + a.v14 * b.v41;
+        double nv12 = a.v11 * b.v12 + a.v12 * b.v22 + a.v13 * b.v32 + a.v14 * b.v42;
+        double nv13 = a.v11 * b.v13 + a.v12 * b.v23 + a.v13 * b.v33 + a.v14 * b.v43;
+        double nv14 = a.v11 * b.v14 + a.v12 * b.v24 + a.v13 * b.v34 + a.v14 * b.v44;
+
+        double nv21 = a.v21 * b.v11 + a.v22 * b.v21 + a.v23 * b.v31 + a.v24 * b.v41;
+        double nv22 = a.v21 * b.v12 + a.v22 * b.v22 + a.v23 * b.v32 + a.v24 * b.v42;
+        double nv23 = a.v21 * b.v13 + a.v22 * b.v23 + a.v23 * b.v33 + a.v24 * b.v43;
+        double nv24 = a.v21 * b.v14 + a.v22 * b.v24 + a.v23 * b.v34 + a.v24 * b.v44;
+
+        double nv31 = a.v31 * b.v11 + a.v32 * b.v21 + a.v33 * b.v31 + a.v34 * b.v41;
+        double nv32 = a.v31 * b.v12 + a.v32 * b.v22 + a.v33 * b.v32 + a.v34 * b.v42;
+        double nv33 = a.v31 * b.v13 + a.v32 * b.v23 + a.v33 * b.v33 + a.v34 * b.v43;
+        double nv34 = a.v31 * b.v14 + a.v32 * b.v24 + a.v33 * b.v34 + a.v34 * b.v44;
+
+        double nv41 = a.v41 * b.v11 + a.v42 * b.v21 + a.v43 * b.v31 + a.v44 * b.v41;
+        double nv42 = a.v41 * b.v12 + a.v42 * b.v22 + a.v43 * b.v32 + a.v44 * b.v42;
+        double nv43 = a.v41 * b.v13 + a.v42 * b.v23 + a.v43 * b.v33 + a.v44 * b.v43;
+        double nv44 = a.v41 * b.v14 + a.v42 * b.v24 + a.v43 * b.v34 + a.v44 * b.v44;
+
+        v11 = nv11; v12 = nv12; v13 = nv13; v14 = nv14;
+        v21 = nv21; v22 = nv22; v23 = nv23; v24 = nv24;
+        v31 = nv31; v32 = nv32; v33 = nv33; v34 = nv34;
+        v41 = nv41; v42 = nv42; v43 = nv43; v44 = nv44;
+        invalidate();
+        return this;
+    }
+
     @Override
     @LuaWhitelist
     @LuaMethodDoc(

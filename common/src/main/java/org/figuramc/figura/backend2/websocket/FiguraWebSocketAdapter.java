@@ -108,6 +108,10 @@ public class FiguraWebSocketAdapter extends WebSocketAdapter {
         reason = reason.trim().isEmpty() ? ERROR_CODES.getOrDefault(code, "Unknown") : reason;
         FiguraMod.LOGGER.info("Closed connection: " + reason + ", Code: " + code + ", Remote: " + remote);
 
+        // stale socket (replaced by a reconnect or closed by us), don't tear down the current connection
+        if (!NetworkStuff.isCurrentWS(websocket))
+            return;
+
         handleClose(code, reason + (FiguraMod.debugModeEnabled() ? "\n\nCode: " + code + "\nRemote: " + remote : ""));
     }
 
@@ -126,5 +130,7 @@ public class FiguraWebSocketAdapter extends WebSocketAdapter {
 
         if (code == 4000)
             NetworkStuff.reAuth();
+        else if (code != 3000 && code != 4001)
+            NetworkStuff.scheduleReconnect(200);
     }
 }

@@ -35,6 +35,7 @@ subprojects {
 		// Mods
 		modCompileOnly "maven.modrinth:iris:$iris"
 		modCompileOnly "maven.modrinth:immediatelyfast:$immediately_fast"
+		modCompileOnly "maven.modrinth:sodium:$sodium"
 		modCompileOnly "maven.modrinth:iris:$iris"
 	}
 }

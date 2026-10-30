@@ -26,7 +26,7 @@ public abstract class LivingEntityMixin extends Entity {
     @Inject(at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/LivingEntity;isUsingItem()Z"), method = "triggerItemUseEffects", cancellable = true)
     private void triggerItemUseEffects(ItemStack stack, int particleCount, CallbackInfo ci) {
         Avatar avatar = AvatarManager.getAvatar(this);
-        if (avatar != null && avatar.useItemEvent(ItemStackAPI.verify(stack), stack.getUseAnimation().name(), particleCount))
+        if (avatar != null && avatar.hasListeners("USE_ITEM") && avatar.useItemEvent(ItemStackAPI.verify(stack), stack.getUseAnimation().name(), particleCount))
             ci.cancel();
     }
 

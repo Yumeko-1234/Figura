@@ -41,7 +41,7 @@ public abstract class CapeLayerMixin extends RenderLayer<AbstractClientPlayer, P
         if (entity.isInvisible() || itemStack.is(Items.ELYTRA))
             return;
 
-        avatar = AvatarManager.getAvatar(entity);
+        avatar = AvatarManager.getAvatarForRender(entity);
         if (avatar == null)
             return;
 

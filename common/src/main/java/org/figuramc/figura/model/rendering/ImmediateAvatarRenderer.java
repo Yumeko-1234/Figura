@@ -9,17 +9,22 @@ import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.avatar.AvatarCulling;
+import org.figuramc.figura.compat.IrisCompat;
+import org.figuramc.figura.compat.SodiumCompat;
 import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.lua.api.ClientAPI;
 import org.figuramc.figura.math.matrix.FiguraMat3;
 import org.figuramc.figura.math.matrix.FiguraMat4;
 import org.figuramc.figura.math.vector.FiguraVec3;
-import org.figuramc.figura.math.vector.FiguraVec4;
 import org.figuramc.figura.model.*;
 import org.figuramc.figura.model.rendering.texture.FiguraTexture;
 import org.figuramc.figura.model.rendering.texture.FiguraTextureSet;
@@ -30,7 +35,6 @@ import org.figuramc.figura.utils.ui.UIHelper;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.function.Consumer;
 
 public class ImmediateAvatarRenderer extends AvatarRenderer {
 
@@ -40,11 +44,57 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private static final PartCustomization pivotOffsetter = new PartCustomization();
     protected static final VertexBuffer VERTEX_BUFFER = new VertexBuffer();
 
+    // detail level used by the current render pass, 0 is full detail
+    public int lodLevel;
+    // if the current render pass skips small parts and uses less detail outside of the head (Simplify Avatar Bodies)
+    public boolean simplifyBody;
+
+    // if the world pass and the pivots pass have anything to do, checked again when a script changes the model structure
+    // these passes walk every part of the model, but most avatars have no world parts and are rarely invisible
+    private boolean needsWorldPass = true, needsPivotsPass = true;
+    private int passCheckVersion = -1;
+
+    // if the profiler is active this pass, the per-part labels are skipped otherwise
+    private boolean profiling;
+
+    // if the part render functions are skipped this pass (Other Avatars' Render Script Interval)
+    private boolean skipPartScripts;
+
+    // -- frame replay -- //
+    // in a crowd, only the closest players are drawn from their model every frame (AvatarCulling.throttleRedraws): the others alternate
+    // between a frame that walks the model and keeps everything it drew, and a frame that draws the same again (Repeat Crowd Avatar Frames)
+    // what is kept stays relative to the entity root of the frame it was made in, the replay only swaps that root for the current one,
+    // so the player still moves and turns every frame while its avatar animates at half rate, like the Epic Fight pose throttle
+    private final FrameCache frameCache = new FrameCache();
+    // if the current pass keeps what it draws for the next frame
+    private boolean capturing;
+    // scratch for the replay: the current root and how it differs from the kept one
+    private final FiguraMat4 replayRoot = FiguraMat4.of(), replayDelta = FiguraMat4.of();
+    private final FiguraMat3 replayRootNormal = FiguraMat3.of(), replayDeltaNormal = FiguraMat3.of();
+
+    // scratch objects reused for every part, instead of allocating new ones each time
+    private final FiguraMat4 voidedPosition = FiguraMat4.of(), worldMatrix = FiguraMat4.of();
+    private final FiguraMat3 voidedNormal = FiguraMat3.of();
+    private final VertexData primaryData = new VertexData(), secondaryData = new VertexData();
+    private final FiguraVec3 pivotScratch = FiguraVec3.of();
+    private final BlockPos.MutableBlockPos lightPos = new BlockPos.MutableBlockPos();
+
+    // light of the last block sampled this pass, most parts of an avatar sit in the same one or two blocks
+    private int lastLightX, lastLightY, lastLightZ, lastLight;
+    private boolean hasLastLight;
+
+    // world space box around what the current world pass draws, published to worldPartBounds when the pass ends
+    // only tracked when the world matrices are up to date this pass
+    private boolean trackWorldBounds;
+    private final double[] passBounds = new double[6];
+    private final FiguraMat4 boundsMatrix = FiguraMat4.of();
+
     public ImmediateAvatarRenderer(Avatar avatar) {
         super(avatar);
 
         // Vertex data, read model parts
         root = FiguraModelPartReader.read(avatar, avatar.nbt.getCompound("models"), textureSets, false);
+        FiguraModelPartReader.buildLods(avatar, root);
 
         sortParts();
     }
@@ -68,6 +118,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     public void updateMatrices() {
         // flag rendering state
         this.isRendering = true;
+        profiling = FiguraMod.isProfilerActive();
 
         // setup root customizations
         PartCustomization customization = setupRootCustomization(1.5d);
@@ -91,11 +142,28 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     protected int commonRender(double vertOffset) {
         // flag rendering state
         this.isRendering = true;
+        profiling = FiguraMod.isProfilerActive();
 
         // iris fix
         int irisConfig = UIHelper.paperdoll || !ClientAPI.hasShaderPackMod() ? 0 : Configs.IRIS_COMPATIBILITY_FIX.value;
         doIrisEmissiveFix = (irisConfig >= 2 && ClientAPI.hasShaderPack()) || (avatar.renderMode != EntityRenderMode.RENDER && avatar.renderMode != EntityRenderMode.WORLD);
         offsetRenderLayers = irisConfig >= 1;
+
+        // reduced detail only for the avatar on its player in the world, never in the gui, first person or world parts
+        lodLevel = avatar.renderMode == EntityRenderMode.RENDER ? avatar.lodLevel : 0;
+
+        // the render scripts of this avatar are skipped this frame, only for the player in the world and its world pass
+        // or already ran in this frame's shadow pass, whose results this pass draws
+        skipPartScripts = (avatar.renderScriptsSkipped
+                && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD))
+                || avatar.reusesShadowScripts();
+
+        // simplified body: the player in the world and the world pass (which walks every part looking for world parts)
+        // never the gui, first person, the host (unless enabled) or the focused players
+        simplifyBody = Configs.SIMPLIFY_AVATAR_BODIES.value && avatar.entityType == EntityType.PLAYER
+                && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD)
+                && (!avatar.isHost || Configs.BODY_LOD_SELF.value)
+                && !AvatarCulling.isFocused(avatar.owner) && !AvatarCulling.isFullDetail(avatar.owner);
 
         // custom textures
         for (FiguraTextureSet set : textureSets)
@@ -110,6 +178,23 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         else
             shouldRenderPivots = config;
 
+        // frame replay, only for the model of the player in the world (the pivot indicators are debug drawing, never kept)
+        boolean replayPass = avatar.renderMode == EntityRenderMode.RENDER && currentFilterScheme == PartFilterScheme.MODEL
+                && shouldRenderPivots == 0 && Configs.REPLAY_CROWD_AVATARS.value;
+        if (replayPass && avatar.redrawSkipped && frameCache.matches(this)) {
+            int used = replayFrame(vertOffset);
+            this.isRendering = false;
+            if (this.dirty)
+                clean();
+            return used;
+        }
+        // (only set by the passes that may keep a frame, a nested pass must not end the keeping of the pass around it)
+        if (replayPass) {
+            capturing = avatar.redrawThrottled;
+            if (capturing)
+                frameCache.begin(this, vertOffset);
+        }
+
         // world matrices
         if (allowMatrixUpdate)
             VIEW_TO_WORLD_MATRIX.set(AvatarRenderer.worldToViewMatrix().invert());
@@ -117,9 +202,17 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // complexity
         int prev = avatar.complexity.remaining;
         int[] remainingComplexity = new int[] {prev};
+        hasLastLight = false;
+        primaryData.cacheValid = secondaryData.cacheValid = false;
+
+        trackWorldBounds = currentFilterScheme == PartFilterScheme.WORLD && allowMatrixUpdate;
+        if (trackWorldBounds) {
+            Arrays.fill(passBounds, 0, 3, Double.MAX_VALUE);
+            Arrays.fill(passBounds, 3, 6, -Double.MAX_VALUE);
+        }
 
         // render all model parts
-        if (root.customization.visible) {
+        if (root.customization.visible && !canSkipPass()) {
             if (currentFilterScheme.parentType.isSeparate) {
                 List<FiguraModelPart> parts = separatedParts.get(currentFilterScheme.parentType);
                 if (parts != null) {
@@ -160,13 +253,36 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             // push vertices to vertex consumer
             FiguraMod.pushProfiler("draw");
             FiguraMod.pushProfiler("primary");
-            VERTEX_BUFFER.consume(true, bufferSource);
-            FiguraMod.popPushProfiler("secondary");
-            VERTEX_BUFFER.consume(false, bufferSource);
+            // own Iris group, so the avatar render types don't tie the vanilla ones into ordering cycles
+            int irisGroup = IrisCompat.beginAvatarGroup(bufferSource);
+            try {
+                VERTEX_BUFFER.consume(true, bufferSource, capturing ? frameCache : null);
+                FiguraMod.popPushProfiler("secondary");
+                VERTEX_BUFFER.consume(false, bufferSource, capturing ? frameCache : null);
+            } finally {
+                IrisCompat.endAvatarGroup(bufferSource, irisGroup);
+            }
             FiguraMod.popProfiler(2);
 
             // finish rendering
             checkEmpty();
+        }
+
+        if (capturing) {
+            capturing = false;
+            frameCache.finish(prev - Math.max(remainingComplexity[0], 0));
+        }
+
+        if (trackWorldBounds) {
+            trackWorldBounds = false;
+            if (passBounds[0] > passBounds[3]) {
+                worldPartBounds = null;
+            } else {
+                if (worldPartBounds == null)
+                    worldPartBounds = new double[6];
+                System.arraycopy(passBounds, 0, worldPartBounds, 0, 6);
+            }
+            worldPartBoundsTick = FiguraMod.ticks;
         }
 
         this.isRendering = false;
@@ -176,20 +292,48 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         return prev - Math.max(remainingComplexity[0], 0);
     }
 
+    // the world and pivots passes only draw world or pivot parts, but they still run the part render functions
+    // so they are only skipped when the model has neither of them and no part render functions
+    private boolean canSkipPass() {
+        boolean world = currentFilterScheme == PartFilterScheme.WORLD;
+        if (!world && currentFilterScheme != PartFilterScheme.PIVOTS)
+            return false;
+
+        if (passCheckVersion != structureVersion) {
+            passCheckVersion = structureVersion;
+            needsWorldPass = needsPivotsPass = false;
+            checkPasses(root);
+        }
+
+        return world ? !needsWorldPass : !needsPivotsPass;
+    }
+
+    private void checkPasses(FiguraModelPart part) {
+        if (part.preRender != null || part.midRender != null || part.postRender != null) {
+            needsWorldPass = needsPivotsPass = true;
+            return;
+        }
+        if (part.parentType == ParentType.World)
+            needsWorldPass = true;
+        else if (part.parentType.isPivot)
+            needsPivotsPass = true;
+        if (needsWorldPass && needsPivotsPass)
+            return;
+
+        for (FiguraModelPart child : part.children) {
+            checkPasses(child);
+            if (needsWorldPass && needsPivotsPass)
+                return;
+        }
+    }
+
     protected PartCustomization setupRootCustomization(double vertOffset) {
         PartCustomization customization = new PartCustomization();
 
         customization.setPrimaryRenderType(RenderTypes.TRANSLUCENT);
         customization.setSecondaryRenderType(RenderTypes.EMISSIVE);
 
-        double s = 1.0 / 16;
-        customization.positionMatrix.scale(s, s, s);
-        customization.positionMatrix.rotateZ(180);
-        customization.positionMatrix.translate(0, vertOffset, 0);
-        customization.normalMatrix.rotateZ(180);
-
-        customization.positionMatrix.multiply(posMat);
-        customization.normalMatrix.multiply(normalMat);
+        rootMatrices(customization.positionMatrix, customization.normalMatrix, vertOffset);
 
         customization.light = light;
         customization.alpha = alpha;
@@ -201,91 +345,222 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         return customization;
     }
 
+    // the transform the whole model is drawn with: model units to blocks, flipped, raised by vertOffset, then the entity pose
+    protected void rootMatrices(FiguraMat4 position, FiguraMat3 normal, double vertOffset) {
+        position.reset();
+        normal.reset();
+
+        double s = 1.0 / 16;
+        position.scale(s, s, s);
+        position.rotateZ(180);
+        position.translate(0, vertOffset, 0);
+        normal.rotateZ(180);
+
+        position.multiply(posMat);
+        normal.multiply(normalMat);
+    }
+
+    // draws the frame kept by the last model pass again, with the entity root of this frame
+    // the kept vertices, pivots, render tasks and render layer parents are all relative to the kept root, so one change of root moves them all
+    private int replayFrame(double vertOffset) {
+        FrameCache cache = frameCache;
+        FiguraMod.pushProfiler("replay");
+
+        // custom textures, a tick script may have changed one since
+        for (FiguraTextureSet set : textureSets)
+            set.uploadIfNeeded();
+        for (FiguraTexture texture : customTextures.values())
+            texture.uploadIfDirty();
+
+        // current root = delta * kept root
+        rootMatrices(replayRoot, replayRootNormal, vertOffset);
+        replayDelta.set(cache.root);
+        replayDelta.invert();
+        replayDelta.multiply(replayRoot);
+        replayDeltaNormal.set(cache.rootNormal);
+        replayDeltaNormal.invert();
+        replayDeltaNormal.multiply(replayRootNormal);
+        // what is kept is moved to the current root, so it stays right if it is ever replayed again
+        cache.root.set(replayRoot);
+        cache.rootNormal.set(replayRootNormal);
+
+        // the parent transforms the render layer passes (cape, elytra) draw their parts from
+        for (int i = 0; i < cache.layerParts.size(); i++) {
+            PartCustomization saved = cache.layerCustomizations.get(i);
+            saved.positionMatrix.multiply(replayDelta);
+            saved.normalMatrix.multiply(replayDeltaNormal);
+            cache.layerParts.get(i).savedCustomization = saved;
+        }
+
+        // the transforms the held items, armor and parrots are drawn with
+        for (int i = 0; i < cache.pivotTypes.size(); i++) {
+            FiguraMat4 position = cache.pivotPositions.get(i).multiply(replayDelta);
+            FiguraMat3 normal = cache.pivotNormals.get(i).multiply(replayDeltaNormal);
+            ConcurrentLinkedQueue<Pair<FiguraMat4, FiguraMat3>> queue = pivotCustomizations.computeIfAbsent(cache.pivotTypes.get(i), p -> new ConcurrentLinkedQueue<>());
+            queue.add(new Pair<>(position.copy(), normal.copy()));
+        }
+
+        // render tasks draw straight into the buffer source, so they are drawn again (before the vertices, like in the model pass)
+        if (!cache.tasks.isEmpty()) {
+            FiguraMod.pushProfiler("renderTasks");
+            interceptRendersIntoFigura = false;
+            for (int i = 0; i < cache.tasks.size(); i++) {
+                RenderTask task = cache.tasks.get(i);
+                PartCustomization parent = cache.taskCustomizations.get(i);
+                parent.positionMatrix.multiply(replayDelta);
+                parent.normalMatrix.multiply(replayDeltaNormal);
+                if (!task.shouldRender())
+                    continue;
+                int light = parent.light != null ? parent.light : LightTexture.FULL_BRIGHT;
+                int overlay = parent.overlay != null ? parent.overlay : OverlayTexture.NO_OVERLAY;
+                customizationStack.push(parent);
+                task.render(customizationStack, bufferSource, light, overlay);
+                customizationStack.pop();
+            }
+            interceptRendersIntoFigura = true;
+            FiguraMod.popProfiler();
+        }
+
+        // the vertices, moved to the current root and written like the model pass does
+        FiguraMod.pushProfiler("draw");
+        int irisGroup = IrisCompat.beginAvatarGroup(bufferSource);
+        try {
+            for (RetainedType retained : cache.types) {
+                VertexConsumer vertexConsumer = bufferSource.getBuffer(retained.renderType);
+                List<Batch> batches = retained.batches;
+                SodiumCompat.BulkWriter bulk = SodiumCompat.writerFor(vertexConsumer, retained.renderType);
+                if (bulk != null) {
+                    for (Batch batch : batches) {
+                        batch.retarget(replayDelta, replayDeltaNormal);
+                        batch.write(bulk);
+                    }
+                    bulk.flush();
+                } else {
+                    for (Batch batch : batches) {
+                        batch.retarget(replayDelta, replayDeltaNormal);
+                        batch.write(vertexConsumer);
+                    }
+                }
+            }
+        } finally {
+            IrisCompat.endAvatarGroup(bufferSource, irisGroup);
+        }
+        FiguraMod.popProfiler(2);
+
+        checkEmpty();
+        return cache.complexityUsed;
+    }
+
+    // a model pass drawn from the model may be replayed by the next frame
+    public boolean canReplay(long frame) {
+        return frameCache.frame == frame - 1;
+    }
+
     protected boolean renderPart(FiguraModelPart part, int[] remainingComplexity, boolean prevPredicate) {
-        FiguraMod.pushProfiler(part.name);
+        push(part.name);
 
         PartCustomization custom = part.customization;
 
         // test the current filter scheme
-        FiguraMod.pushProfiler("predicate");
+        push("predicate");
         Boolean thisPassedPredicate = currentFilterScheme.test(part.parentType, prevPredicate);
         if (thisPassedPredicate == null || (!custom.visible)) {
-            if (part.parentType.isRenderLayer)
-                part.savedCustomization = customizationStack.peek();
-            FiguraMod.popProfiler(2);
+            if (part.parentType.isRenderLayer) {
+                // the stack reuses its entries, so keep a copy for the render layer pass
+                if (part.savedCustomizationStore == null)
+                    part.savedCustomizationStore = new PartCustomization();
+                customizationStack.peek().copyTo(part.savedCustomizationStore);
+                part.savedCustomization = part.savedCustomizationStore;
+                if (capturing)
+                    frameCache.keepLayerParent(part, part.savedCustomizationStore);
+            }
+            pop(2);
             return true;
+        }
+
+        // simplified body: small parts are skipped as if they were hidden
+        if (simplifyBody && !part.lodKeep && part.lodSize < FiguraModelPartReader.SIMPLIFY_MIN_SIZE && !needsFullRender(part)) {
+            // the skipped faces still count, so a simplified avatar never shows more than the full one
+            remainingComplexity[0] -= part.lodFaces;
+            pop(2);
+            return part.lodFaces == 0 || remainingComplexity[0] > 0;
         }
 
         // calculate part transforms
 
         // calculate vanilla parent
-        FiguraMod.popPushProfiler("copyVanillaPart");
+        popPush("copyVanillaPart");
         part.applyVanillaTransforms(vanillaModelData);
         part.applyExtraTransforms(customizationStack.peek());
 
         // visibility
-        FiguraMod.popPushProfiler("checkVanillaVisible");
+        popPush("checkVanillaVisible");
         if (!ignoreVanillaVisibility && custom.vanillaVisible != null && !custom.vanillaVisible) {
-            FiguraMod.popPushProfiler("removeVanillaTransforms");
+            popPush("removeVanillaTransforms");
             part.resetVanillaTransforms();
-            FiguraMod.popProfiler(2);
+            pop(2);
             return true;
         }
 
         // pre render function
-        if (part.preRender != null) {
-            FiguraMod.popPushProfiler("preRenderFunction");
-            avatar.run(part.preRender, avatar.render, tickDelta, avatar.renderMode.name(), part);
+        if (part.preRender != null && !skipPartScripts) {
+            popPush("preRenderFunction");
+            avatar.run(part.preRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }
 
         // recalculate stuff
-        FiguraMod.popPushProfiler("calculatePartMatrices");
+        popPush("calculatePartMatrices");
         custom.recalculate();
 
         // void blocked matrices
         // that's right, check only for previous predicate
-        FiguraMat4 positionCopy = null;
-        FiguraMat3 normalCopy = null;
+        // (the copies are restored right after the push, before any children, so one scratch copy is enough)
         boolean voidMatrices = !allowHiddenTransforms && !prevPredicate;
         if (voidMatrices) {
-            FiguraMod.popPushProfiler("clearMatrices");
-            positionCopy = custom.positionMatrix.copy();
-            normalCopy = custom.normalMatrix.copy();
+            popPush("clearMatrices");
+            voidedPosition.set(custom.positionMatrix);
+            voidedNormal.set(custom.normalMatrix);
             custom.positionMatrix.reset();
             custom.normalMatrix.reset();
         }
 
         // push stack
-        FiguraMod.popPushProfiler("pushCustomizationStack");
+        popPush("pushCustomizationStack");
         customizationStack.push(custom);
 
         // restore variables
         if (voidMatrices) {
-            FiguraMod.popPushProfiler("restoreMatrices");
-            custom.positionMatrix.set(positionCopy);
-            custom.normalMatrix.set(normalCopy);
+            popPush("restoreMatrices");
+            custom.positionMatrix.set(voidedPosition);
+            custom.normalMatrix.set(voidedNormal);
         }
 
         if (thisPassedPredicate) {
             // recalculate world matrices
-            FiguraMod.popPushProfiler("worldMatrices");
+            popPush("worldMatrices");
             if (allowMatrixUpdate) {
                 FiguraMat4 mat = partToWorldMatrices(custom);
                 part.savedPartToWorldMat.set(mat);
             }
 
             // recalculate light
-            FiguraMod.popPushProfiler("calculateLight");
+            popPush("calculateLight");
             Level l;
             if (custom.light != null) {
                 updateLight = false;
                 pivotOffsetter.light = custom.light;
             }
             else if (updateLight && (l = Minecraft.getInstance().level) != null) {
-                FiguraVec3 pos = part.savedPartToWorldMat.apply(0d, 0d, 0d);
-                int block = l.getBrightness(LightLayer.BLOCK, pos.asBlockPos());
-                int sky = l.getBrightness(LightLayer.SKY, pos.asBlockPos());
-                customizationStack.peek().light = LightTexture.pack(block, sky);
+                // the part origin in world space is the translation column of its world matrix
+                FiguraMat4 mat = part.savedPartToWorldMat;
+                int x = Mth.floor(mat.v14), y = Mth.floor(mat.v24), z = Mth.floor(mat.v34);
+                if (!hasLastLight || x != lastLightX || y != lastLightY || z != lastLightZ) {
+                    lightPos.set(x, y, z);
+                    lastLight = LightTexture.pack(l.getBrightness(LightLayer.BLOCK, lightPos), l.getBrightness(LightLayer.SKY, lightPos));
+                    lastLightX = x; lastLightY = y; lastLightZ = z;
+                    hasLastLight = true;
+                }
+                customizationStack.peek().light = lastLight;
             }
 
             if (custom.alpha != null)
@@ -295,17 +570,19 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         }
 
         // mid render function
-        if (part.midRender != null) {
-            FiguraMod.popPushProfiler("midRenderFunction");
-            avatar.run(part.midRender, avatar.render, tickDelta, avatar.renderMode.name(), part);
+        if (part.midRender != null && !skipPartScripts) {
+            popPush("midRenderFunction");
+            avatar.run(part.midRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }
 
         // render this
-        FiguraMod.popPushProfiler("pushVertices");
+        popPush("pushVertices");
         boolean breakRender = thisPassedPredicate && !part.pushVerticesImmediate(this, remainingComplexity);
+        if (trackWorldBounds && thisPassedPredicate)
+            includeVertexBounds(part);
 
         // render extras
-        FiguraMod.popPushProfiler("extras");
+        popPush("extras");
         if (!breakRender && thisPassedPredicate) {
             boolean renderPivot = shouldRenderPivots > 0;
             boolean renderTasks = !part.renderTasks.isEmpty();
@@ -318,10 +595,9 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 int overlay = parent.overlay != null ? parent.overlay : OverlayTexture.NO_OVERLAY;
 
                 // fix pivots
-                FiguraMod.pushProfiler("fixMatricesPivot");
+                push("fixMatricesPivot");
 
-                FiguraVec3 pivot = custom.getPivot().copy().add(custom.getOffsetPivot());
-                pivotOffsetter.setPos(pivot);
+                pivotOffsetter.setPos(custom.getPivot(pivotScratch, true));
                 pivotOffsetter.recalculate();
                 customizationStack.push(pivotOffsetter);
 
@@ -329,13 +605,13 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
                 // render pivot indicators
                 if (renderPivot) {
-                    FiguraMod.popPushProfiler("renderPivotCube");
+                    popPush("renderPivotCube");
                     renderPivot(part, peek);
                 }
 
                 // render tasks
                 if (renderTasks) {
-                    FiguraMod.popPushProfiler("renderTasks");
+                    popPush("renderTasks");
                     interceptRendersIntoFigura = false;
                     for (RenderTask task : part.renderTasks.values()) {
                         if (!task.shouldRender())
@@ -343,28 +619,34 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                         int neededComplexity = task.getComplexity();
                         if (neededComplexity > remainingComplexity[0])
                             break;
-                        FiguraMod.pushProfiler(task.getName());
+                        push(task.getName());
                         task.render(customizationStack, bufferSource, light, overlay);
+                        if (trackWorldBounds)
+                            includeTaskBounds(peek, task);
+                        if (capturing)
+                            frameCache.keepTask(task, peek);
                         remainingComplexity[0] -= neededComplexity;
-                        FiguraMod.popProfiler();
+                        pop();
                     }
                     interceptRendersIntoFigura = true;
                 }
 
                 // render pivot parts
                 if (renderPivotParts && part.parentType.isPivot) {
-                    FiguraMod.popPushProfiler("savePivotParts");
+                    popPush("savePivotParts");
                     savePivotTransform(part.parentType, peek);
                 }
 
                 customizationStack.pop();
-                FiguraMod.popProfiler();
+                pop();
             }
         }
 
         // render children
-        FiguraMod.popPushProfiler("children");
-        for (FiguraModelPart child : List.copyOf(part.children)) {
+        popPush("children");
+        // by index instead of a copy of the list: scripts may still add or remove children while rendering
+        for (int i = 0; i < part.children.size(); i++) {
+            FiguraModelPart child = part.children.get(i);
             if (!renderPart(child, remainingComplexity, thisPassedPredicate)) {
                 breakRender = true;
                 break;
@@ -372,20 +654,53 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         }
 
         // reset the parent
-        FiguraMod.popPushProfiler("removeVanillaTransforms");
+        popPush("removeVanillaTransforms");
         part.resetVanillaTransforms();
 
         // post render function
-        if (part.postRender != null) {
-            FiguraMod.popPushProfiler("postRenderFunction");
-            avatar.run(part.postRender, avatar.render, tickDelta, avatar.renderMode.name(), part);
+        if (part.postRender != null && !skipPartScripts) {
+            popPush("postRenderFunction");
+            avatar.run(part.postRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }
 
         // pop
         customizationStack.pop();
-        FiguraMod.popProfiler(2);
+        pop(2);
 
         return !breakRender;
+    }
+
+    // profiler labels of the part walk, only when the profiler is active (every part pushes a dozen of them)
+    private void push(String name) {
+        if (profiling) FiguraMod.pushProfiler(name);
+    }
+
+    private void popPush(String name) {
+        if (profiling) FiguraMod.popPushProfiler(name);
+    }
+
+    private void pop() {
+        if (profiling) FiguraMod.popProfiler();
+    }
+
+    private void pop(int times) {
+        if (profiling) FiguraMod.popProfiler(times);
+    }
+
+    // if the part or one of its children does more than drawing its own faces
+    // (scripts, render tasks, the head, or special parents like pivots and world parts), so it can't be skipped
+    // only called for small parts, which rarely have many children
+    private static boolean needsFullRender(FiguraModelPart part) {
+        ParentType type = part.parentType;
+        if (part.preRender != null || part.midRender != null || part.postRender != null || !part.renderTasks.isEmpty()
+                || type.isSeparate || type.isPivot || type.isRenderLayer
+                || type == ParentType.Head || type == ParentType.Skull || type == ParentType.Portrait)
+            return true;
+        for (FiguraModelPart child : part.children) {
+            if (needsFullRender(child))
+                return true;
+        }
+        return false;
     }
 
     protected void renderPivot(FiguraModelPart part, PartCustomization customization) {
@@ -407,56 +722,90 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         FiguraMat3 currentNormalMat = customization.getNormalMatrix();
         ConcurrentLinkedQueue<Pair<FiguraMat4, FiguraMat3>> queue = pivotCustomizations.computeIfAbsent(parentType, p -> new ConcurrentLinkedQueue<>());
         queue.add(new Pair<>(currentPosMat, currentNormalMat)); // These are COPIES, so ok to add
+        if (capturing)
+            frameCache.keepPivot(parentType, currentPosMat, currentNormalMat);
     }
 
+    // the returned matrix is reused by the next call, copy it to keep it
     protected FiguraMat4 partToWorldMatrices(PartCustomization cust) {
-        FiguraMat4 customizePeek = customizationStack.peek().positionMatrix.copy();
+        FiguraMat4 customizePeek = worldMatrix;
+        customizePeek.set(customizationStack.peek().positionMatrix);
         customizePeek.multiply(VIEW_TO_WORLD_MATRIX);
-        FiguraVec3 piv = cust.getPivot();
-
-        FiguraMat4 translation = FiguraMat4.of();
-        translation.translate(piv);
-        customizePeek.rightMultiply(translation);
+        FiguraVec3 piv = cust.getPivot(pivotScratch, false);
+        // same as multiplying by a translation matrix on the right, only the last column changes
+        customizePeek.translateFirst(piv.x, piv.y, piv.z);
 
         return customizePeek;
     }
 
+    // -- world part bounds -- //
+
+    // adds the corners of the box around the part vertices, as transformed by the current top of the stack
+    private void includeVertexBounds(FiguraModelPart part) {
+        float[] box = part.getVertexBox();
+        if (box == null)
+            return;
+
+        FiguraMat4 m = boundsMatrix;
+        m.set(customizationStack.peek().positionMatrix);
+        m.multiply(VIEW_TO_WORLD_MATRIX);
+        for (int i = 0; i < 8; i++)
+            includePoint(m, box[(i & 1) == 0 ? 0 : 3], box[(i & 2) == 0 ? 1 : 4], box[(i & 4) == 0 ? 2 : 5]);
+    }
+
+    // adds the origin of a render task, its size is left to the margin added by AvatarCulling
+    private void includeTaskBounds(PartCustomization parent, RenderTask task) {
+        FiguraMat4 m = boundsMatrix;
+        m.set(parent.positionMatrix);
+        m.multiply(VIEW_TO_WORLD_MATRIX);
+        FiguraMat4 t = task.getRenderedMatrix();
+        includePoint(m, t.v14, t.v24, t.v34);
+    }
+
+    private void includePoint(FiguraMat4 m, double x, double y, double z) {
+        double wx = m.v11 * x + m.v12 * y + m.v13 * z + m.v14;
+        double wy = m.v21 * x + m.v22 * y + m.v23 * z + m.v24;
+        double wz = m.v31 * x + m.v32 * y + m.v33 * z + m.v34;
+        passBounds[0] = Math.min(passBounds[0], wx); passBounds[1] = Math.min(passBounds[1], wy); passBounds[2] = Math.min(passBounds[2], wz);
+        passBounds[3] = Math.max(passBounds[3], wx); passBounds[4] = Math.max(passBounds[4], wy); passBounds[5] = Math.max(passBounds[5], wz);
+    }
+
     protected void calculatePartMatrices(FiguraModelPart part) {
-        FiguraMod.pushProfiler(part.name);
+        push(part.name);
 
         PartCustomization custom = part.customization;
 
         // Store old visibility, but overwrite it in case we only want to render certain parts
-        FiguraMod.pushProfiler("predicate");
+        push("predicate");
         Boolean thisPassedPredicate = currentFilterScheme.test(part.parentType, true);
         if (thisPassedPredicate == null) {
-            FiguraMod.popProfiler(2);
+            pop(2);
             return;
         }
 
         // calculate part transforms
 
         // calculate vanilla parent
-        FiguraMod.popPushProfiler("copyVanillaPart");
+        popPush("copyVanillaPart");
         part.applyVanillaTransforms(vanillaModelData);
         part.applyExtraTransforms(customizationStack.peek());
 
         // push customization stack
-        FiguraMod.popPushProfiler("calculatePartMatrices");
+        popPush("calculatePartMatrices");
         custom.recalculate();
-        FiguraMod.popPushProfiler("applyOnStack");
+        popPush("applyOnStack");
         customizationStack.push(custom);
 
         // render extras
         if (thisPassedPredicate) {
             // part to world matrices
-            FiguraMod.popPushProfiler("worldMatrices");
+            popPush("worldMatrices");
             FiguraMat4 mat = partToWorldMatrices(custom);
             part.savedPartToWorldMat.set(mat);
         }
 
         // render children
-        FiguraMod.popPushProfiler("children");
+        popPush("children");
         for (FiguraModelPart child : part.children)
             calculatePartMatrices(child);
 
@@ -465,10 +814,17 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // pop
         customizationStack.pop();
-        FiguraMod.popProfiler(2);
+        pop(2);
     }
 
-    public void pushFaces(int faceCount, int[] remainingComplexity, FiguraTextureSet textureSet, List<Vertex> vertices) {
+    // cost: the complexity taken by these faces, given back when nothing is drawn
+    public void pushFaces(int faceCount, int cost, int[] remainingComplexity, FiguraTextureSet textureSet, List<Vertex> vertices) {
+        pushFaces(faceCount, cost, remainingComplexity, textureSet, vertices, null, null);
+    }
+
+    // packed: the same vertices as one float array (FiguraModelPart.pack), read instead of the vertex objects
+    // while owner (the part they belong to) has not exposed them to scripts, both may be null
+    public void pushFaces(int faceCount, int cost, int[] remainingComplexity, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner) {
         // Handle cases that we can quickly
         if (faceCount == 0 || vertices.isEmpty())
             return;
@@ -479,20 +835,38 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         VertexData secondary = getTexture(customization, textureSet, false);
 
         if (primary.renderType == null && secondary.renderType == null) {
-            remainingComplexity[0] += faceCount;
+            remainingComplexity[0] += cost;
             return;
         }
 
         if (primary.renderType != null)
-            pushToBuffer(faceCount, primary, customization, textureSet, vertices);
+            pushToBuffer(faceCount, primary, customization, textureSet, vertices, packed, owner);
         if (secondary.renderType != null)
-            pushToBuffer(faceCount, secondary, customization, textureSet, vertices);
+            pushToBuffer(faceCount, secondary, customization, textureSet, vertices, packed, owner);
     }
 
     private VertexData getTexture(PartCustomization customization, FiguraTextureSet textureSet, boolean primary) {
         RenderTypes types = primary ? customization.getPrimaryRenderType() : customization.getSecondaryRenderType();
         TextureCustomization texture = primary ? customization.primaryTexture : customization.secondaryTexture;
-        VertexData ret = new VertexData();
+        // reused for every face batch, its values are read right away by pushToBuffer
+        VertexData ret = primary ? primaryData : secondaryData;
+
+        // most batches in a row use the same texture and render type, so the last result is kept for the rest of the pass
+        // (texture customizations are immutable, a script setting a new texture makes a new one, so identity is enough)
+        if (ret.cacheValid && ret.cachedTypes == types && ret.cachedTexture == texture && ret.cachedSet == textureSet) {
+            ret.color = types == RenderTypes.NONE ? null : primary ? customization.color : customization.color2;
+            return ret;
+        }
+        ret.cacheValid = true;
+        ret.cachedTypes = types;
+        ret.cachedTexture = texture;
+        ret.cachedSet = textureSet;
+
+        ret.renderType = null;
+        ret.fullBright = false;
+        ret.vertexOffset = 0;
+        ret.color = null;
+        ret.primary = false;
 
         if (types == RenderTypes.NONE)
             return ret;
@@ -535,41 +909,13 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         return ret;
     }
 
-    private static final FiguraVec4 pos = FiguraVec4.of();
-    private static final FiguraVec3 normal = FiguraVec3.of();
-    private static final FiguraVec3 uv = FiguraVec3.of(0, 0, 1);
-    private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices) {
-        int vertCount = faceCount * 4;
-
-        FiguraVec3 uvFixer = FiguraVec3.of();
-        uvFixer.set(textureSet.getWidth(), textureSet.getHeight(), 1); // Dividing by this makes uv 0 to 1
-
-        int overlay = customization.overlay;
-        int light = vertexData.fullBright ? LightTexture.FULL_BRIGHT : customization.light;
-
-        VERTEX_BUFFER.getBufferFor(vertexData.renderType, vertexData.primary, vertexConsumer -> {
-            for (int i = 0; i < vertCount; i++) {
-                Vertex vertex = vertices.get(i);
-
-                pos.set(vertex.x, vertex.y, vertex.z, 1);
-                pos.transform(customization.positionMatrix);
-                pos.add(pos.normalized().scale(vertexData.vertexOffset));
-                normal.set(vertex.nx, vertex.ny, vertex.nz);
-                normal.transform(customization.normalMatrix);
-                uv.set(vertex.u, vertex.v, 1);
-                uv.divide(uvFixer);
-                uv.transform(customization.uvMatrix);
-
-                vertexConsumer
-                        .vertex(pos.x, pos.y, pos.z)
-                        .color((float) vertexData.color.x, (float) vertexData.color.y, (float) vertexData.color.z, customization.alpha)
-                        .uv((float) uv.x, (float) uv.y)
-                        .overlayCoords(overlay)
-                        .uv2(light)
-                        .normal((float) normal.x, (float) normal.y, (float) normal.z)
-                        .endVertex();
-            }
-        });
+    private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner) {
+        // everything the write needs is copied now, the vertices themselves are read when the buffer is consumed
+        // (the customization is a copy owned by the stack, so its values are the same as when the buffer is consumed)
+        VERTEX_BUFFER.add(vertexData.renderType, vertexData.primary).set(
+                Math.min(faceCount * 4, vertices.size()), vertices, packed, owner, customization,
+                textureSet.getWidth(), textureSet.getHeight(), vertexData
+        );
     }
 
     private static class VertexData {
@@ -578,27 +924,384 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         public float vertexOffset;
         public FiguraVec3 color;
         public boolean primary;
+
+        // what the values above were resolved from, cleared at the start of every pass
+        // (skins load late and the translucent, glowing and iris flags change between passes)
+        public boolean cacheValid;
+        public RenderTypes cachedTypes;
+        public TextureCustomization cachedTexture;
+        public FiguraTextureSet cachedSet;
+    }
+
+    // the vertices of one face batch, with the values needed to transform them
+    // pooled and reused every frame
+    private static class Batch {
+        private List<Vertex> vertices;
+        // the same vertices packed (FiguraModelPart.pack), read instead of the objects while the owner part has not exposed them
+        private float[] packed;
+        private FiguraModelPart owner;
+        private int vertCount;
+
+        private double p11, p12, p13, p14, p21, p22, p23, p24, p31, p32, p33, p34, p41, p42, p43, p44;
+        private double n11, n12, n13, n21, n22, n23, n31, n32, n33;
+        // uv matrix with the division by the texture size (which makes uv 0 to 1) folded in
+        private double t11, t12, t13, t21, t22, t23;
+        private double offset;
+        private float r, g, b, a;
+        private int overlay, light;
+
+        void set(int vertCount, List<Vertex> vertices, float[] packed, FiguraModelPart owner, PartCustomization customization, double w, double h, VertexData vertexData) {
+            this.vertCount = vertCount;
+            this.vertices = vertices;
+            this.packed = packed;
+            this.owner = owner;
+
+            FiguraMat4 p = customization.positionMatrix;
+            p11 = p.v11; p12 = p.v12; p13 = p.v13; p14 = p.v14;
+            p21 = p.v21; p22 = p.v22; p23 = p.v23; p24 = p.v24;
+            p31 = p.v31; p32 = p.v32; p33 = p.v33; p34 = p.v34;
+            p41 = p.v41; p42 = p.v42; p43 = p.v43; p44 = p.v44;
+
+            FiguraMat3 n = customization.normalMatrix;
+            n11 = n.v11; n12 = n.v12; n13 = n.v13;
+            n21 = n.v21; n22 = n.v22; n23 = n.v23;
+            n31 = n.v31; n32 = n.v32; n33 = n.v33;
+
+            FiguraMat3 t = customization.uvMatrix;
+            t11 = t.v11 / w; t12 = t.v12 / h; t13 = t.v13;
+            t21 = t.v21 / w; t22 = t.v22 / h; t23 = t.v23;
+
+            offset = vertexData.vertexOffset;
+            r = (float) vertexData.color.x; g = (float) vertexData.color.y; b = (float) vertexData.color.z; a = customization.alpha;
+            overlay = customization.overlay;
+            light = vertexData.fullBright ? LightTexture.FULL_BRIGHT : customization.light;
+        }
+
+        // moves the batch to another root: its matrices become delta * (what they were), see ImmediateAvatarRenderer.replayFrame
+        void retarget(FiguraMat4 d, FiguraMat3 dn) {
+            double a11 = d.v11 * p11 + d.v12 * p21 + d.v13 * p31 + d.v14 * p41;
+            double a12 = d.v11 * p12 + d.v12 * p22 + d.v13 * p32 + d.v14 * p42;
+            double a13 = d.v11 * p13 + d.v12 * p23 + d.v13 * p33 + d.v14 * p43;
+            double a14 = d.v11 * p14 + d.v12 * p24 + d.v13 * p34 + d.v14 * p44;
+
+            double a21 = d.v21 * p11 + d.v22 * p21 + d.v23 * p31 + d.v24 * p41;
+            double a22 = d.v21 * p12 + d.v22 * p22 + d.v23 * p32 + d.v24 * p42;
+            double a23 = d.v21 * p13 + d.v22 * p23 + d.v23 * p33 + d.v24 * p43;
+            double a24 = d.v21 * p14 + d.v22 * p24 + d.v23 * p34 + d.v24 * p44;
+
+            double a31 = d.v31 * p11 + d.v32 * p21 + d.v33 * p31 + d.v34 * p41;
+            double a32 = d.v31 * p12 + d.v32 * p22 + d.v33 * p32 + d.v34 * p42;
+            double a33 = d.v31 * p13 + d.v32 * p23 + d.v33 * p33 + d.v34 * p43;
+            double a34 = d.v31 * p14 + d.v32 * p24 + d.v33 * p34 + d.v34 * p44;
+
+            double a41 = d.v41 * p11 + d.v42 * p21 + d.v43 * p31 + d.v44 * p41;
+            double a42 = d.v41 * p12 + d.v42 * p22 + d.v43 * p32 + d.v44 * p42;
+            double a43 = d.v41 * p13 + d.v42 * p23 + d.v43 * p33 + d.v44 * p43;
+            double a44 = d.v41 * p14 + d.v42 * p24 + d.v43 * p34 + d.v44 * p44;
+
+            p11 = a11; p12 = a12; p13 = a13; p14 = a14;
+            p21 = a21; p22 = a22; p23 = a23; p24 = a24;
+            p31 = a31; p32 = a32; p33 = a33; p34 = a34;
+            p41 = a41; p42 = a42; p43 = a43; p44 = a44;
+
+            double b11 = dn.v11 * n11 + dn.v12 * n21 + dn.v13 * n31;
+            double b12 = dn.v11 * n12 + dn.v12 * n22 + dn.v13 * n32;
+            double b13 = dn.v11 * n13 + dn.v12 * n23 + dn.v13 * n33;
+
+            double b21 = dn.v21 * n11 + dn.v22 * n21 + dn.v23 * n31;
+            double b22 = dn.v21 * n12 + dn.v22 * n22 + dn.v23 * n32;
+            double b23 = dn.v21 * n13 + dn.v22 * n23 + dn.v23 * n33;
+
+            double b31 = dn.v31 * n11 + dn.v32 * n21 + dn.v33 * n31;
+            double b32 = dn.v31 * n12 + dn.v32 * n22 + dn.v33 * n32;
+            double b33 = dn.v31 * n13 + dn.v32 * n23 + dn.v33 * n33;
+
+            n11 = b11; n12 = b12; n13 = b13;
+            n21 = b21; n22 = b22; n23 = b23;
+            n31 = b31; n32 = b32; n33 = b33;
+        }
+
+        // the packed array to read this batch from, null when the vertex objects have to be read
+        // (a script may have got hold of them since the batch was set, then only the objects are up to date)
+        private float[] source() {
+            float[] p = packed;
+            return p != null && (owner == null || !owner.verticesExposed()) ? p : null;
+        }
+
+        // bulk path, when Sodium can take the vertices directly
+        void write(SodiumCompat.BulkWriter bulk) {
+            int color = SodiumCompat.packColor(r, g, b, a);
+            float[] p = source();
+            if (p != null) {
+                for (int i = 0, o = 0; i < vertCount; i++, o += FiguraModelPart.PACKED_STRIDE) {
+                    double vx = p[o], vy = p[o + 1], vz = p[o + 2];
+                    double x = p11 * vx + p12 * vy + p13 * vz + p14;
+                    double y = p21 * vx + p22 * vy + p23 * vz + p24;
+                    double z = p31 * vx + p32 * vy + p33 * vz + p34;
+                    if (offset != 0) {
+                        double pw = p41 * vx + p42 * vy + p43 * vz + p44;
+                        double len = Math.sqrt(x * x + y * y + z * z + pw * pw);
+                        if (len > 0) {
+                            double s = 1 + offset / len;
+                            x *= s; y *= s; z *= s;
+                        }
+                    }
+                    double nx = p[o + 5], ny = p[o + 6], nz = p[o + 7];
+                    double u = p[o + 3], vv = p[o + 4];
+                    bulk.vertex(
+                            (float) x, (float) y, (float) z,
+                            color,
+                            (float) (t11 * u + t12 * vv + t13), (float) (t21 * u + t22 * vv + t23),
+                            overlay, light,
+                            SodiumCompat.packNormal((float) (n11 * nx + n12 * ny + n13 * nz), (float) (n21 * nx + n22 * ny + n23 * nz), (float) (n31 * nx + n32 * ny + n33 * nz))
+                    );
+                }
+                return;
+            }
+
+            for (int i = 0; i < vertCount; i++) {
+                Vertex v = vertices.get(i);
+                double vx = v.x, vy = v.y, vz = v.z;
+                double x = p11 * vx + p12 * vy + p13 * vz + p14;
+                double y = p21 * vx + p22 * vy + p23 * vz + p24;
+                double z = p31 * vx + p32 * vy + p33 * vz + p34;
+                if (offset != 0) {
+                    double pw = p41 * vx + p42 * vy + p43 * vz + p44;
+                    double len = Math.sqrt(x * x + y * y + z * z + pw * pw);
+                    if (len > 0) {
+                        double s = 1 + offset / len;
+                        x *= s; y *= s; z *= s;
+                    }
+                }
+                double nx = v.nx, ny = v.ny, nz = v.nz;
+                double u = v.u, vv = v.v;
+                bulk.vertex(
+                        (float) x, (float) y, (float) z,
+                        color,
+                        (float) (t11 * u + t12 * vv + t13), (float) (t21 * u + t22 * vv + t23),
+                        overlay, light,
+                        SodiumCompat.packNormal((float) (n11 * nx + n12 * ny + n13 * nz), (float) (n21 * nx + n22 * ny + n23 * nz), (float) (n31 * nx + n32 * ny + n33 * nz))
+                );
+            }
+        }
+
+        void write(VertexConsumer vertexConsumer) {
+            float[] p = source();
+            if (p != null) {
+                for (int i = 0, o = 0; i < vertCount; i++, o += FiguraModelPart.PACKED_STRIDE) {
+                    double vx = p[o], vy = p[o + 1], vz = p[o + 2];
+                    double x = p11 * vx + p12 * vy + p13 * vz + p14;
+                    double y = p21 * vx + p22 * vy + p23 * vz + p24;
+                    double z = p31 * vx + p32 * vy + p33 * vz + p34;
+                    if (offset != 0) {
+                        double pw = p41 * vx + p42 * vy + p43 * vz + p44;
+                        double len = Math.sqrt(x * x + y * y + z * z + pw * pw);
+                        if (len > 0) {
+                            double s = 1 + offset / len;
+                            x *= s; y *= s; z *= s;
+                        }
+                    }
+                    double nx = p[o + 5], ny = p[o + 6], nz = p[o + 7];
+                    double u = p[o + 3], vv = p[o + 4];
+                    // one call per vertex, which buffers write directly instead of element by element
+                    vertexConsumer.vertex(
+                            (float) x, (float) y, (float) z,
+                            r, g, b, a,
+                            (float) (t11 * u + t12 * vv + t13), (float) (t21 * u + t22 * vv + t23),
+                            overlay, light,
+                            (float) (n11 * nx + n12 * ny + n13 * nz), (float) (n21 * nx + n22 * ny + n23 * nz), (float) (n31 * nx + n32 * ny + n33 * nz)
+                    );
+                }
+                return;
+            }
+
+            for (int i = 0; i < vertCount; i++) {
+                Vertex v = vertices.get(i);
+                double vx = v.x, vy = v.y, vz = v.z;
+                double x = p11 * vx + p12 * vy + p13 * vz + p14;
+                double y = p21 * vx + p22 * vy + p23 * vz + p24;
+                double z = p31 * vx + p32 * vy + p33 * vz + p34;
+                if (offset != 0) {
+                    double pw = p41 * vx + p42 * vy + p43 * vz + p44;
+                    double len = Math.sqrt(x * x + y * y + z * z + pw * pw);
+                    if (len > 0) {
+                        double s = 1 + offset / len;
+                        x *= s; y *= s; z *= s;
+                    }
+                }
+                double nx = v.nx, ny = v.ny, nz = v.nz;
+                double u = v.u, vv = v.v;
+                // one call per vertex, which buffers write directly instead of element by element
+                vertexConsumer.vertex(
+                        (float) x, (float) y, (float) z,
+                        r, g, b, a,
+                        (float) (t11 * u + t12 * vv + t13), (float) (t21 * u + t22 * vv + t23),
+                        overlay, light,
+                        (float) (n11 * nx + n12 * ny + n13 * nz), (float) (n21 * nx + n22 * ny + n23 * nz), (float) (n31 * nx + n32 * ny + n33 * nz)
+                );
+            }
+        }
     }
 
     private static class VertexBuffer {
-        private final HashMap<RenderType, List<Consumer<VertexConsumer>>> primaryBuffers = new LinkedHashMap<>();
-        private final HashMap<RenderType, List<Consumer<VertexConsumer>>> secondaryBuffers = new LinkedHashMap<>();
+        private final HashMap<RenderType, List<Batch>> primaryBuffers = new LinkedHashMap<>();
+        private final HashMap<RenderType, List<Batch>> secondaryBuffers = new LinkedHashMap<>();
+        // reused between frames, so a frame allocates nothing once warmed up
+        private final ArrayDeque<Batch> freeBatches = new ArrayDeque<>();
+        private final ArrayDeque<List<Batch>> freeLists = new ArrayDeque<>();
 
-        public void getBufferFor(RenderType renderType, boolean primary, Consumer<VertexConsumer> consumer) {
-            HashMap<RenderType, List<Consumer<VertexConsumer>>> buffer = primary ? primaryBuffers : secondaryBuffers;
-            List<Consumer<VertexConsumer>> list = buffer.computeIfAbsent(renderType, renderType1 -> new ArrayList<>());
-            list.add(consumer);
+        public Batch add(RenderType renderType, boolean primary) {
+            HashMap<RenderType, List<Batch>> buffer = primary ? primaryBuffers : secondaryBuffers;
+            List<Batch> list = buffer.get(renderType);
+            if (list == null) {
+                list = freeLists.isEmpty() ? new ArrayList<>() : freeLists.pop();
+                buffer.put(renderType, list);
+            }
+            Batch batch = freeBatches.isEmpty() ? new Batch() : freeBatches.pop();
+            list.add(batch);
+            return batch;
         }
 
-        public void consume(boolean primary, MultiBufferSource bufferSource) {
-            HashMap<RenderType, List<Consumer<VertexConsumer>>> map = primary ? primaryBuffers : secondaryBuffers;
-            for (Map.Entry<RenderType, List<Consumer<VertexConsumer>>> entry : map.entrySet()) {
-                VertexConsumer vertexConsumer = bufferSource.getBuffer(entry.getKey());
-                List<Consumer<VertexConsumer>> consumers = entry.getValue();
-                for (Consumer<VertexConsumer> consumer : consumers)
-                    consumer.accept(vertexConsumer);
+        // keep: the frame cache the batches are kept in for a replay instead of being freed, or null
+        public void consume(boolean primary, MultiBufferSource bufferSource, FrameCache keep) {
+            HashMap<RenderType, List<Batch>> map = primary ? primaryBuffers : secondaryBuffers;
+            for (Map.Entry<RenderType, List<Batch>> entry : map.entrySet()) {
+                RenderType renderType = entry.getKey();
+                VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
+                List<Batch> batches = entry.getValue();
+
+                // one bulk writer for the whole render type, so it is pushed in full chunks instead of once per part
+                SodiumCompat.BulkWriter bulk = SodiumCompat.writerFor(vertexConsumer, renderType);
+                if (bulk != null) {
+                    for (Batch batch : batches)
+                        batch.write(bulk);
+                    bulk.flush();
+                } else {
+                    for (Batch batch : batches)
+                        batch.write(vertexConsumer);
+                }
+
+                if (keep != null)
+                    keep.retain(renderType, batches);
+                else
+                    free(batches);
             }
             map.clear();
+        }
+
+        // returns the batches and their list to the pools
+        void free(List<Batch> batches) {
+            for (Batch batch : batches) {
+                batch.vertices = null;
+                batch.packed = null;
+                batch.owner = null;
+                freeBatches.push(batch);
+            }
+            batches.clear();
+            freeLists.push(batches);
+        }
+    }
+
+    // the batches of one render type, in the order the model pass drew them
+    private record RetainedType(RenderType renderType, List<Batch> batches) {}
+
+    // everything one model pass drew, kept for the next frame to draw again (see replayFrame)
+    private static class FrameCache {
+        // the level frame of the pass, -1 when nothing is kept
+        long frame = -1;
+        // the entity root everything kept is relative to
+        final FiguraMat4 root = FiguraMat4.of();
+        final FiguraMat3 rootNormal = FiguraMat3.of();
+        // the state of the pass, a replay must find the same
+        int lodLevel, structureVersion;
+        boolean simplifyBody, translucent, glowing, doIrisEmissiveFix, offsetRenderLayers;
+        float alpha;
+        int complexityUsed;
+
+        final List<RetainedType> types = new ArrayList<>();
+        // the render layer parts (cape, elytra) with the parent transform saved for their pass
+        final List<FiguraModelPart> layerParts = new ArrayList<>();
+        final List<PartCustomization> layerCustomizations = new ArrayList<>();
+        // the pivot parts (held items, armor, parrots) with the transform saved for them
+        final List<ParentType> pivotTypes = new ArrayList<>();
+        final List<FiguraMat4> pivotPositions = new ArrayList<>();
+        final List<FiguraMat3> pivotNormals = new ArrayList<>();
+        // the render tasks drawn, with the transform of their part
+        final List<RenderTask> tasks = new ArrayList<>();
+        final List<PartCustomization> taskCustomizations = new ArrayList<>();
+        // customization copies reused between frames
+        private final List<PartCustomization> customizationPool = new ArrayList<>();
+        private int customizationsUsed;
+
+        // if the kept frame is the last one and was drawn in the same state as the pass starting now
+        boolean matches(ImmediateAvatarRenderer renderer) {
+            return frame == Avatar.getLevelFrame() - 1
+                    && lodLevel == renderer.lodLevel && simplifyBody == renderer.simplifyBody
+                    && translucent == renderer.translucent && glowing == renderer.glowing
+                    && doIrisEmissiveFix == renderer.doIrisEmissiveFix && offsetRenderLayers == renderer.offsetRenderLayers
+                    && structureVersion == renderer.structureVersion && alpha == renderer.alpha;
+        }
+
+        // drops the kept frame and starts keeping the pass starting now
+        void begin(ImmediateAvatarRenderer renderer, double vertOffset) {
+            clear();
+            renderer.rootMatrices(root, rootNormal, vertOffset);
+            lodLevel = renderer.lodLevel;
+            simplifyBody = renderer.simplifyBody;
+            translucent = renderer.translucent;
+            glowing = renderer.glowing;
+            doIrisEmissiveFix = renderer.doIrisEmissiveFix;
+            offsetRenderLayers = renderer.offsetRenderLayers;
+            structureVersion = renderer.structureVersion;
+            alpha = renderer.alpha;
+        }
+
+        void finish(int complexityUsed) {
+            this.complexityUsed = complexityUsed;
+            frame = Avatar.getLevelFrame();
+        }
+
+        void clear() {
+            frame = -1;
+            for (RetainedType retained : types)
+                VERTEX_BUFFER.free(retained.batches);
+            types.clear();
+            layerParts.clear();
+            layerCustomizations.clear();
+            pivotTypes.clear();
+            pivotPositions.clear();
+            pivotNormals.clear();
+            tasks.clear();
+            taskCustomizations.clear();
+            customizationsUsed = 0;
+        }
+
+        void retain(RenderType renderType, List<Batch> batches) {
+            types.add(new RetainedType(renderType, batches));
+        }
+
+        void keepLayerParent(FiguraModelPart part, PartCustomization parent) {
+            layerParts.add(part);
+            layerCustomizations.add(copy(parent));
+        }
+
+        void keepPivot(ParentType type, FiguraMat4 position, FiguraMat3 normal) {
+            pivotTypes.add(type);
+            pivotPositions.add(position.copy());
+            pivotNormals.add(normal.copy());
+        }
+
+        void keepTask(RenderTask task, PartCustomization parent) {
+            tasks.add(task);
+            taskCustomizations.add(copy(parent));
+        }
+
+        private PartCustomization copy(PartCustomization customization) {
+            if (customizationsUsed == customizationPool.size())
+                customizationPool.add(new PartCustomization());
+            PartCustomization copy = customizationPool.get(customizationsUsed++);
+            customization.copyTo(copy);
+            return copy;
         }
     }
 }

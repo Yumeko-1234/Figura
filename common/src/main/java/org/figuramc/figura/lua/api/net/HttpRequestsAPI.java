@@ -28,12 +28,12 @@ import java.util.*;
 )
 public class HttpRequestsAPI {
     private final NetworkingAPI parent;
-    private final HttpClient httpClient;
+    // shared by every avatar, each client owns a selector thread and native buffers
+    private static final HttpClient httpClient = HttpClient.newBuilder().build();
     private static final List<String> disallowedHeaders = Arrays.asList("Host", "X-Forwarded-Host", "X-Host");
 
     HttpRequestsAPI(NetworkingAPI parent) {
         this.parent = parent;
-        httpClient = HttpClient.newBuilder().build();
     }
 
     @LuaWhitelist
@@ -284,7 +284,7 @@ public class HttpRequestsAPI {
             parent.parent.log(NetworkingAPI.LogSource.HTTP, Component.literal("Sent %s request to %s".formatted(method, uri)));
             HttpRequest req = this.getRequest();
             FiguraFuture<HttpResponse> future = new FiguraFuture<>();
-            var asyncResponse = parent.httpClient.sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+            var asyncResponse = httpClient.sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofInputStream());
             asyncResponse.whenCompleteAsync((response, t) -> {
                 if (t != null) future.error(t);
                 else future.complete(new HttpResponse(new FiguraInputStream(parent.parent.owner, response.body()),

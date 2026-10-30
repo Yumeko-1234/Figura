@@ -30,7 +30,7 @@ public abstract class TridentRendererMixin<T extends ThrownTrident > extends Ent
         if (owner == null)
             return;
 
-        Avatar avatar = AvatarManager.getAvatar(owner);
+        Avatar avatar = AvatarManager.getAvatarForRender(owner);
         if (avatar == null || avatar.permissions.get(Permissions.VANILLA_MODEL_EDIT) == 0)
             return;
 
@@ -39,7 +39,7 @@ public abstract class TridentRendererMixin<T extends ThrownTrident > extends Ent
         FiguraMod.pushProfiler("tridentRender");
 
         FiguraMod.pushProfiler("event");
-        boolean bool = avatar.tridentRenderEvent(tickDelta, EntityAPI.wrap(abstractTrident));
+        boolean bool = avatar.hasListeners("TRIDENT_RENDER") && avatar.tridentRenderEvent(tickDelta, EntityAPI.wrap(abstractTrident));
 
         FiguraMod.popPushProfiler("render");
         if (bool || avatar.renderTrident(poseStack, multiBufferSource, tickDelta, light)) {

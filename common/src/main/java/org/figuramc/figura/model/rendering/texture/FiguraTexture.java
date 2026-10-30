@@ -10,6 +10,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.ResourceManager;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.lua.LuaNotNil;
 import org.figuramc.figura.lua.LuaWhitelist;
 import org.figuramc.figura.lua.docs.LuaMethodDoc;
@@ -52,43 +53,106 @@ public class FiguraTexture extends SimpleTexture {
 
     /**
      * Native image holding the texture data for this texture.
+     * Other players' textures only need it on the GPU: it is null once uploaded (or while "upload" waits for the first render),
+     * and is read again from the source file if a script or a new size limit needs it, see image()
      */
-    private final NativeImage texture;
+    private NativeImage texture;
+    // the image ready for the next upload of a dropped texture, already downscaled, closed once uploaded
+    private NativeImage upload;
+    // the file the texture was read from, null when it was made by a script or could not be read (then the image is never dropped)
+    private final byte[] source;
+    private final int width, height;
+    // a script used the image, it stays loaded from then on
+    private boolean pinned;
     private NativeImage backup;
     private boolean isClosed = false;
 
     public FiguraTexture(Avatar owner, String name, byte[] data) {
         super(new FiguraIdentifier("avatar_tex/" + owner.owner + "/" + UUID.randomUUID()));
 
-        // Read image from wrapper
-        NativeImage image;
+        NativeImage image = read(data);
+        this.source = image == null ? null : data;
+        if (image == null)
+            image = new NativeImage(1, 1, true);
+
+        this.texture = image;
+        this.width = image.getWidth();
+        this.height = image.getHeight();
+        this.name = name;
+        this.owner = owner;
+
+        // other players' textures: keep only what the first upload needs, the full image is loaded again from the source if ever needed
+        if (canDrop()) {
+            int factor = getDownscaleFactor();
+            if (factor > 1) {
+                this.upload = downscale(image, factor);
+                image.close();
+            } else {
+                this.upload = image;
+            }
+            this.texture = null;
+        }
+    }
+
+    public FiguraTexture(Avatar owner, String name, int width, int height) {
+        this(owner, name, new NativeImage(width, height, true), "");
+    }
+
+    public FiguraTexture(Avatar owner, String name, NativeImage image) {
+        this(owner, name, image, "custom/");
+    }
+
+    private FiguraTexture(Avatar owner, String name, NativeImage image, String prefix) {
+        super(new FiguraIdentifier("avatar_tex/" + owner.owner + "/" + prefix + UUID.randomUUID()));
+        this.texture = image;
+        this.source = null;
+        this.width = image.getWidth();
+        this.height = image.getHeight();
+        this.name = name;
+        this.owner = owner;
+    }
+
+    private static NativeImage read(byte[] data) {
         try {
             ByteBuffer wrapper = BufferUtils.createByteBuffer(data.length);
             wrapper.put(data);
             wrapper.rewind();
-            image = NativeImage.read(wrapper);
+            return NativeImage.read(wrapper);
         } catch (IOException e) {
             FiguraMod.LOGGER.error("", e);
-            image = new NativeImage(1, 1, true);
+            return null;
         }
-
-        this.texture = image;
-        this.name = name;
-        this.owner = owner;
     }
 
-    public FiguraTexture(Avatar owner, String name, int width, int height) {
-        super(new FiguraIdentifier("avatar_tex/" + owner.owner + "/" + UUID.randomUUID()));
-        this.texture = new NativeImage(width, height, true);
-        this.name = name;
-        this.owner = owner;
+    // the full image, read again from the source when it was dropped
+    private NativeImage image() {
+        if (texture == null) {
+            if (source == null)
+                throw new IllegalStateException("Texture " + name + " has no image");
+            // the pending upload is the full image when it did not need downscaling
+            if (upload != null && upload.getWidth() == width && upload.getHeight() == height) {
+                texture = upload;
+            } else {
+                if (upload != null)
+                    upload.close();
+                texture = read(source);
+                if (texture == null)
+                    texture = new NativeImage(width, height, true);
+            }
+            upload = null;
+        }
+        return texture;
     }
 
-    public FiguraTexture(Avatar owner, String name, NativeImage image) {
-        super(new FiguraIdentifier("avatar_tex/" + owner.owner + "/custom/" + UUID.randomUUID()));
-        this.texture = image;
-        this.name = name;
-        this.owner = owner;
+    // the image for a script: from now on it stays loaded, scripts expect their changes and reads to be consistent
+    private NativeImage scriptImage() {
+        pinned = true;
+        return image();
+    }
+
+    // if the full image can be freed between uploads
+    private boolean canDrop() {
+        return source != null && !pinned && !owner.isHost;
     }
 
     @Override
@@ -102,9 +166,13 @@ public class FiguraTexture extends SimpleTexture {
         isClosed = true;
 
         // Close native images
-        texture.close();
+        if (texture != null)
+            texture.close();
+        if (upload != null && upload != texture)
+            upload.close();
         if (backup != null)
             backup.close();
+        texture = upload = backup = null;
 
         this.releaseId();
         ((TextureManagerAccessor) Minecraft.getInstance().getTextureManager()).getByPath().remove(this.location);
@@ -120,9 +188,26 @@ public class FiguraTexture extends SimpleTexture {
             dirty = false;
 
             RenderCall runnable = () -> {
+                if (isClosed)
+                    return;
+
                 // Upload texture to GPU.
-                TextureUtil.prepareImage(this.getId(), texture.getWidth(), texture.getHeight());
-                texture.upload(0, 0, 0, false);
+                // other players' textures larger than the limit only get a smaller copy on the GPU
+                // uvs (which are 0 to 1) and scripts see the full size, see image()
+                NativeImage ready = upload;
+                upload = null;
+                if (ready == null) {
+                    NativeImage full = image();
+                    int factor = getDownscaleFactor();
+                    ready = factor > 1 ? downscale(full, factor) : full;
+                }
+
+                TextureUtil.prepareImage(this.getId(), ready.getWidth(), ready.getHeight());
+                // the host's image and the ones scripts use stay here, the others are freed once on the GPU
+                boolean keep = ready == texture && !canDrop();
+                ready.upload(0, 0, 0, !keep);
+                if (ready == texture && !keep)
+                    texture = null;
             };
 
             if (RenderSystem.isOnRenderThreadOrInit()) {
@@ -133,8 +218,57 @@ public class FiguraTexture extends SimpleTexture {
         }
     }
 
+    // forces the texture to be uploaded again, eg. when the size limit changes
+    public void markDirty() {
+        this.dirty = true;
+    }
+
+    private int getDownscaleFactor() {
+        int max = Configs.AVATAR_TEXTURE_SIZE.value;
+        if (max <= 0 || owner.isHost)
+            return 1;
+        int size = Math.max(width, height);
+        return (size + max - 1) / max;
+    }
+
+    // box filter, weighted by alpha so transparent pixels don't darken the edges
+    private static NativeImage downscale(NativeImage src, int factor) {
+        int srcW = src.getWidth(), srcH = src.getHeight();
+        int w = Math.max((srcW + factor - 1) / factor, 1), h = Math.max((srcH + factor - 1) / factor, 1);
+        NativeImage dst = new NativeImage(w, h, false);
+
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                long r = 0, g = 0, b = 0, a = 0;
+                int count = 0;
+                int maxY = Math.min((y + 1) * factor, srcH), maxX = Math.min((x + 1) * factor, srcW);
+                for (int sy = y * factor; sy < maxY; sy++) {
+                    for (int sx = x * factor; sx < maxX; sx++) {
+                        int c = src.getPixelRGBA(sx, sy); // ABGR
+                        int alpha = c >>> 24;
+                        r += (long) (c & 0xFF) * alpha;
+                        g += (long) ((c >> 8) & 0xFF) * alpha;
+                        b += (long) ((c >> 16) & 0xFF) * alpha;
+                        a += alpha;
+                        count++;
+                    }
+                }
+
+                int out = 0;
+                if (a > 0) {
+                    int ra = (int) (r / a), ga = (int) (g / a), ba = (int) (b / a);
+                    int aa = (int) (a / count);
+                    out = (aa << 24) | (ba << 16) | (ga << 8) | ra;
+                }
+                dst.setPixelRGBA(x, y, out);
+            }
+        }
+
+        return dst;
+    }
+
     public void writeTexture(Path dest) throws IOException {
-        texture.writeToFile(dest);
+        image().writeToFile(dest);
     }
 
     private void backupImage() {
@@ -144,17 +278,18 @@ public class FiguraTexture extends SimpleTexture {
     }
 
     public NativeImage copy() {
+        NativeImage texture = scriptImage();
         NativeImage image = new NativeImage(texture.format(), texture.getWidth(), texture.getHeight(), true);
         image.copyFrom(texture);
         return image;
     }
 
     public int getWidth() {
-        return texture.getWidth();
+        return width;
     }
 
     public int getHeight() {
-        return texture.getHeight();
+        return height;
     }
 
     public ResourceLocation getLocation() {
@@ -196,7 +331,7 @@ public class FiguraTexture extends SimpleTexture {
             value = "texture.get_pixel")
     public FiguraVec4 getPixel(int x, int y) {
         try {
-            return ColorUtils.abgrToRGBA(texture.getPixelRGBA(x, y));
+            return ColorUtils.abgrToRGBA(scriptImage().getPixelRGBA(x, y));
         } catch (Exception e) {
             throw new LuaError(e.getMessage());
         }
@@ -223,7 +358,7 @@ public class FiguraTexture extends SimpleTexture {
     public FiguraTexture setPixel(int x, int y, Object r, Double g, Double b, Double a) {
         try {
             backupImage();
-            texture.setPixelRGBA(x, y, ColorUtils.rgbaToIntABGR(parseColor("setPixel", r, g, b, a)));
+            scriptImage().setPixelRGBA(x, y, ColorUtils.rgbaToIntABGR(parseColor("setPixel", r, g, b, a)));
             return this;
         } catch (Exception e) {
             throw new LuaError(e.getMessage());
@@ -255,7 +390,7 @@ public class FiguraTexture extends SimpleTexture {
     public FiguraTexture fill(int x, int y, int width, int height, Object r, Double g, Double b, Double a) {
         try {
             backupImage();
-            texture.fillRect(x, y, width, height, ColorUtils.rgbaToIntABGR(parseColor("fill", r, g, b, a)));
+            scriptImage().fillRect(x, y, width, height, ColorUtils.rgbaToIntABGR(parseColor("fill", r, g, b, a)));
             return this;
         } catch (Exception e) {
             throw new LuaError(e.getMessage());
@@ -273,7 +408,7 @@ public class FiguraTexture extends SimpleTexture {
     @LuaMethodDoc("texture.restore")
     public FiguraTexture restore() {
         if (modified) {
-            this.texture.copyFrom(backup);
+            scriptImage().copyFrom(backup);
             this.modified = false;
         }
         return this;
@@ -283,7 +418,7 @@ public class FiguraTexture extends SimpleTexture {
     @LuaMethodDoc("texture.save")
     public String save() {
         try {
-            return Base64.getEncoder().encodeToString(texture.asByteArray());
+            return Base64.getEncoder().encodeToString(scriptImage().asByteArray());
         } catch (Exception e) {
             throw new LuaError(e.getMessage());
         }

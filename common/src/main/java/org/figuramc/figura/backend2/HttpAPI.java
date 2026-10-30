@@ -25,7 +25,8 @@ public class HttpAPI {
 
 
     protected static URI getUri(String url) {
-        return URI.create(getBackendAddress() + "/" + url);
+        // callers pass both "auth/id" and "/auth/id", the latter used to request "/api//auth/id"
+        return URI.create(getBackendAddress() + "/" + (url.startsWith("/") ? url.substring(1) : url));
     }
 
     protected static String getBackendAddress() {
@@ -51,6 +52,14 @@ public class HttpAPI {
     }
 
 
+    // requests sent with the token from before a reauth are expected to fail, so only a rejected current token reauths
+    // otherwise every request still in flight during a reauth starts another one
+    private static void unauthorized(HttpRequest request) {
+        HttpAPI current = NetworkStuff.api;
+        if (current != null && request.headers().firstValue("token").map(current.token::equals).orElse(true))
+            NetworkStuff.reAuth();
+    }
+
     // -- runners -- // 
 
 
@@ -59,7 +68,7 @@ public class HttpAPI {
             requestDebug(request);
             HttpResponse<String> response = NetworkStuff.client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             int code = response.statusCode();
-            if (code == 401) NetworkStuff.reAuth();
+            if (code == 401) unauthorized(request);
             consumer.accept(code, response.body());
         } catch (Exception e) {
             if (!e.getMessage().contains("GOAWAY received"))
@@ -72,7 +81,7 @@ public class HttpAPI {
             requestDebug(request);
             HttpResponse<InputStream> response = NetworkStuff.client.send(request, HttpResponse.BodyHandlers.ofInputStream());
             int code = response.statusCode();
-            if (code == 401) NetworkStuff.reAuth();
+            if (code == 401) unauthorized(request);
             consumer.accept(code, response.body());
         } catch (Exception e) {
             if (!e.getMessage().contains("GOAWAY received"))

@@ -1,0 +1,15 @@
+{
+  "name": "figura-backend-node",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Minimal Node.js backend compatible with org.figuramc.figura.backend2 client API shapes (development use).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
+
+

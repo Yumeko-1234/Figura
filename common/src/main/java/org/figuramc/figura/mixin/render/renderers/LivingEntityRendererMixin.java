@@ -55,9 +55,16 @@ public abstract class LivingEntityRendererMixin<T extends LivingEntity, M extend
     @Unique
     private Matrix4f lastPose;
 
+    // the pose of the entity model relative to the pose at the start of the entity render
+    @Unique
+    private FiguraMat4 figura$poseMatrix(PoseStack poseStack) {
+        Matrix4f diff = new Matrix4f(lastPose).invert().mul(poseStack.last().pose());
+        return new FiguraMat4().set(diff);
+    }
+
     @Inject(at = @At("HEAD"), method = "render(Lnet/minecraft/world/entity/LivingEntity;FFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V")
     private void onRender(T livingEntity, float f, float g, PoseStack poseStack, MultiBufferSource multiBufferSource, int i, CallbackInfo ci) {
-        currentAvatar = AvatarManager.getAvatar(livingEntity);
+        currentAvatar = AvatarManager.getAvatarForRender(livingEntity);
         if (currentAvatar == null)
             return;
 
@@ -110,15 +117,19 @@ public abstract class LivingEntityRendererMixin<T extends LivingEntity, M extend
         FiguraMod.pushProfiler(FiguraMod.MOD_ID);
         FiguraMod.pushProfiler(currentAvatar);
 
+        // the pose matrix is only built for avatars listening to the render events
         FiguraMod.pushProfiler("calculateMatrix");
-        Matrix4f diff = new Matrix4f(lastPose).invert().mul(poseStack.last().pose());
-        FiguraMat4 poseMatrix = new FiguraMat4().set(diff);
+        FiguraMat4 poseMatrix = currentAvatar.hasListeners("RENDER") || currentAvatar.hasListeners("POST_RENDER") ? figura$poseMatrix(poseStack) : null;
 
         FiguraMod.popPushProfiler("renderEvent");
         currentAvatar.renderEvent(delta, poseMatrix);
 
         FiguraMod.popPushProfiler("render");
         currentAvatar.render(entity, yaw, delta, translucent ? 0.15f : 1f, poseStack, bufferSource, light, overlay, (LivingEntityRenderer<?, ?>) (Object) this, filter, translucent, glowing);
+
+        // the render event may have registered a post render listener
+        if (poseMatrix == null && currentAvatar.hasListeners("POST_RENDER"))
+            poseMatrix = figura$poseMatrix(poseStack);
 
         FiguraMod.popPushProfiler("postRenderEvent");
         currentAvatar.postRenderEvent(delta, poseMatrix);
@@ -158,7 +169,7 @@ public abstract class LivingEntityRendererMixin<T extends LivingEntity, M extend
 
     @Inject(method = "isEntityUpsideDown", at = @At("HEAD"), cancellable = true)
     private static void isEntityUpsideDown(LivingEntity entity, CallbackInfoReturnable<Boolean> cir) {
-        Avatar avatar = AvatarManager.getAvatar(entity);
+        Avatar avatar = AvatarManager.getAvatarForRender(entity);
         if (RenderUtils.vanillaModelAndScript(avatar)) {
             Boolean upsideDown = avatar.luaRuntime.renderer.upsideDown;
             if (upsideDown != null)

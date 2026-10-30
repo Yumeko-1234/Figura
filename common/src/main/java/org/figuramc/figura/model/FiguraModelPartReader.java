@@ -5,12 +5,14 @@ import com.mojang.datafixers.util.Pair;
 import net.minecraft.core.UUIDUtil;
 import net.minecraft.nbt.*;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.EntityType;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.animation.Animation;
 import org.figuramc.figura.animation.Interpolation;
 import org.figuramc.figura.animation.Keyframe;
 import org.figuramc.figura.animation.TransformType;
 import org.figuramc.figura.avatar.Avatar;
+import org.figuramc.figura.avatar.AvatarCulling;
 import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.math.vector.FiguraVec2;
 import org.figuramc.figura.math.vector.FiguraVec3;
@@ -43,6 +45,17 @@ public class FiguraModelPartReader {
             List<FiguraTextureSet> textureSets,
             boolean smoothNormals,
             Byte inheritedFormatVersion
+    ) {
+        return read(owner, partCompound, textureSets, smoothNormals, inheritedFormatVersion, getLodCell(owner));
+    }
+
+    private static FiguraModelPart read(
+            Avatar owner,
+            CompoundTag partCompound,
+            List<FiguraTextureSet> textureSets,
+            boolean smoothNormals,
+            Byte inheritedFormatVersion,
+            float lodCell
     ) {
         // if not present, assume v4
         byte formatVersion = partCompound.contains("_v") ? partCompound.getByte("_v") :
@@ -79,6 +92,17 @@ public class FiguraModelPartReader {
         if (partCompound.contains("vsb"))
             customization.visible = partCompound.getBoolean("vsb");
 
+        // the head (and everything attached to it) always keeps full detail
+        ParentType parentType = null;
+        if (partCompound.contains("pt")) {
+            try {
+                parentType = ParentType.valueOf(partCompound.getString("pt"));
+            } catch (Exception ignored) {
+            }
+        }
+        if (parentType == ParentType.Head || parentType == ParentType.Skull || parentType == ParentType.Portrait)
+            lodCell = 0f;
+
         // textures
         List<Integer> facesByTexture = new ArrayList<>(0);
         while (textureSets.size() > facesByTexture.size())
@@ -89,9 +113,13 @@ public class FiguraModelPartReader {
         if (hasCubeData(partCompound)) {
             readCuboid(facesByTexture, partCompound, vertices);
             customization.partType = PartCustomization.PartType.CUBE;
+            if (lodCell > 0f)
+                reduceCube(facesByTexture, vertices, lodCell);
         } else if (hasMeshData(partCompound)) {
             readMesh(facesByTexture, partCompound, vertices);
             customization.partType = PartCustomization.PartType.MESH;
+            if (lodCell > 0f)
+                reduceMesh(facesByTexture, vertices, lodCell, true);
         }
 
         // smooth normals
@@ -106,7 +134,7 @@ public class FiguraModelPartReader {
         if (partCompound.contains("chld")) {
             ListTag listTag = partCompound.getList("chld", Tag.TAG_COMPOUND);
             for (Tag tag : listTag)
-                children.add(read(owner, (CompoundTag) tag, textureSets, smoothNormals, formatVersion));
+                children.add(read(owner, (CompoundTag) tag, textureSets, smoothNormals, formatVersion, lodCell));
         }
 
         FiguraModelPart result = new FiguraModelPart(
@@ -119,12 +147,8 @@ public class FiguraModelPartReader {
 
         result.facesByTexture = facesByTexture;
         storeTextures(result, textureSets);
-        if (partCompound.contains("pt")) {
-            try {
-                result.parentType = ParentType.valueOf(partCompound.getString("pt"));
-            } catch (Exception ignored) {
-            }
-        }
+        if (parentType != null)
+            result.parentType = parentType;
 
         // Read animations :D
         if (partCompound.contains("anim")) {
@@ -546,6 +570,227 @@ public class FiguraModelPartReader {
             vi += numVerts;
             uvi += 2 * numVerts;
         }
+    }
+
+    // -- body detail reduction -- //
+
+    // grid size, in model pixels, for each Body Detail Reduction level (index 0 is off)
+    private static final float[] LOD_CELLS = {0f, 0.5f, 1f, 2f};
+
+    // only player avatars are reduced, the host avatar only when enabled in the config, never the full detail players
+    // (this only changes the loaded model, the avatar file and what gets uploaded stay untouched)
+    public static float getLodCell(Avatar owner) {
+        if (owner.entityType != EntityType.PLAYER || (owner.isHost && !Configs.BODY_LOD_SELF.value) || AvatarCulling.isFullDetail(owner.owner))
+            return 0f;
+        int level = Configs.BODY_LOD.value;
+        return level < 0 || level >= LOD_CELLS.length ? 0f : LOD_CELLS[level];
+    }
+
+    // removes cubes that are smaller than a grid cell, and faces with no area (sides of flat planes)
+    private static void reduceCube(List<Integer> facesByTexture, Map<Integer, List<Vertex>> vertices, float cell) {
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (List<Vertex> list : vertices.values()) {
+            for (Vertex v : list) {
+                minX = Math.min(minX, v.x); minY = Math.min(minY, v.y); minZ = Math.min(minZ, v.z);
+                maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y); maxZ = Math.max(maxZ, v.z);
+            }
+        }
+
+        boolean tiny = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ)) < cell;
+        for (Map.Entry<Integer, List<Vertex>> entry : vertices.entrySet()) {
+            List<Vertex> list = entry.getValue();
+            List<Vertex> kept = new ArrayList<>(list.size());
+            if (!tiny) {
+                for (int i = 0; i + 3 < list.size(); i += 4) {
+                    if (faceArea(list.get(i), list.get(i + 1), list.get(i + 2), list.get(i + 3)) > 1e-6f)
+                        kept.addAll(list.subList(i, i + 4));
+                }
+            }
+            entry.setValue(kept);
+            facesByTexture.set(entry.getKey(), kept.size() / 4);
+        }
+    }
+
+    // vertex clustering: snaps every vertex to the average position of the grid cell it falls in,
+    // then removes the faces that collapsed into a line or a point
+    // each vertex keeps its own UV, so the texture is not smeared, only the shape is simplified
+    private static void reduceMesh(List<Integer> facesByTexture, Map<Integer, List<Vertex>> vertices, float cell, boolean updateNormals) {
+        // average position of each cell
+        Map<Long, float[]> cells = new HashMap<>();
+        for (List<Vertex> list : vertices.values()) {
+            for (Vertex v : list) {
+                float[] sum = cells.computeIfAbsent(cellKey(v, cell), k -> new float[4]);
+                sum[0] += v.x; sum[1] += v.y; sum[2] += v.z; sum[3]++;
+            }
+        }
+
+        for (Map.Entry<Integer, List<Vertex>> entry : vertices.entrySet()) {
+            List<Vertex> list = entry.getValue();
+            List<Vertex> kept = new ArrayList<>(list.size());
+
+            for (int i = 0; i + 3 < list.size(); i += 4) {
+                long k0 = cellKey(list.get(i), cell), k1 = cellKey(list.get(i + 1), cell);
+                long k2 = cellKey(list.get(i + 2), cell), k3 = cellKey(list.get(i + 3), cell);
+
+                // triangles are stored as quads with the last vertex repeated, so count the distinct cells
+                int distinct = 1;
+                if (k1 != k0) distinct++;
+                if (k2 != k0 && k2 != k1) distinct++;
+                if (k3 != k0 && k3 != k1 && k3 != k2) distinct++;
+                if (distinct < 3)
+                    continue;
+
+                long[] keys = {k0, k1, k2, k3};
+                for (int j = 0; j < 4; j++) {
+                    Vertex v = list.get(i + j);
+                    float[] sum = cells.get(keys[j]);
+                    v.x = sum[0] / sum[3];
+                    v.y = sum[1] / sum[3];
+                    v.z = sum[2] / sum[3];
+                }
+
+                Vertex a = list.get(i), b = list.get(i + 1), c = list.get(i + 2), d = list.get(i + 3);
+                if (faceArea(a, b, c, d) <= 1e-6f)
+                    continue;
+
+                // the shape changed, so update the flat normal (same formula as readMesh)
+                // distant copies keep the original normals instead, so smooth shaded meshes stay smooth
+                if (!updateNormals) {
+                    kept.add(a); kept.add(b); kept.add(c); kept.add(d);
+                    continue;
+                }
+                float ux = c.x - b.x, uy = c.y - b.y, uz = c.z - b.z;
+                float vx = a.x - b.x, vy = a.y - b.y, vz = a.z - b.z;
+                float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+                if (len > 1e-6f) {
+                    for (Vertex v : new Vertex[] {a, b, c, d}) {
+                        v.nx = nx / len; v.ny = ny / len; v.nz = nz / len;
+                    }
+                }
+
+                kept.add(a); kept.add(b); kept.add(c); kept.add(d);
+            }
+
+            entry.setValue(kept);
+            facesByTexture.set(entry.getKey(), kept.size() / 4);
+        }
+    }
+
+    // -- distance detail levels -- //
+
+    // grid size, in model pixels, of each distance detail level (level 1 is index 0)
+    private static final float[] DISTANCE_LOD_CELLS = {1f, 2f, 4f};
+    public static final int LOD_LEVELS = DISTANCE_LOD_CELLS.length;
+
+    // builds the reduced copies used when a player avatar is far away, see FiguraModelPart.lods
+    public static void buildLods(Avatar owner, FiguraModelPart root) {
+        if (owner.entityType == EntityType.PLAYER) {
+            buildLods(root);
+            computeSimplifyInfo(root, false);
+        }
+    }
+
+    // -- simplify avatar bodies -- //
+
+    // parts (with their children) smaller than this many model pixels are skipped
+    public static final float SIMPLIFY_MIN_SIZE = 2f;
+    // distance detail level always used by the simplified parts
+    public static final int SIMPLIFY_LOD_LEVEL = 2;
+
+    // fills lodKeep, lodSize and lodFaces, returns the box {minX, minY, minZ, maxX, maxY, maxZ} around the part and its children
+    // vertices are stored in model space at rest, so the boxes of children can be merged directly
+    private static float[] computeSimplifyInfo(FiguraModelPart part, boolean keep) {
+        ParentType type = part.parentType;
+        keep |= type == ParentType.Head || type == ParentType.Skull || type == ParentType.Portrait;
+        part.lodKeep = keep;
+
+        float[] box = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
+        for (List<Vertex> list : part.vertices.values()) {
+            for (Vertex v : list) {
+                box[0] = Math.min(box[0], v.x); box[1] = Math.min(box[1], v.y); box[2] = Math.min(box[2], v.z);
+                box[3] = Math.max(box[3], v.x); box[4] = Math.max(box[4], v.y); box[5] = Math.max(box[5], v.z);
+            }
+        }
+
+        int faces = countFaces(part.facesByTexture);
+        for (FiguraModelPart child : part.children) {
+            float[] childBox = computeSimplifyInfo(child, keep);
+            faces += child.lodFaces;
+            for (int i = 0; i < 3; i++) {
+                box[i] = Math.min(box[i], childBox[i]);
+                box[i + 3] = Math.max(box[i + 3], childBox[i + 3]);
+            }
+        }
+
+        part.lodFaces = faces;
+        // an empty group has no box, so it counts as size 0
+        part.lodSize = box[0] > box[3] ? 0f : Math.max(box[3] - box[0], Math.max(box[4] - box[1], box[5] - box[2]));
+        return box;
+    }
+
+    private static void buildLods(FiguraModelPart part) {
+        PartCustomization.PartType type = part.customization.partType;
+        if ((type == PartCustomization.PartType.CUBE || type == PartCustomization.PartType.MESH) && !part.vertices.isEmpty()) {
+            int fullFaces = countFaces(part.facesByTexture);
+            FiguraModelPart.Lod prev = new FiguraModelPart.Lod(part.vertices, part.facesByTexture);
+            FiguraModelPart.Lod[] lods = new FiguraModelPart.Lod[LOD_LEVELS];
+
+            for (int i = 0; i < LOD_LEVELS; i++) {
+                Map<Integer, List<Vertex>> vertices = new HashMap<>();
+                for (Map.Entry<Integer, List<Vertex>> entry : part.vertices.entrySet()) {
+                    List<Vertex> list = new ArrayList<>(entry.getValue().size());
+                    for (Vertex vertex : entry.getValue())
+                        list.add(vertex.copy());
+                    vertices.put(entry.getKey(), list);
+                }
+                List<Integer> faces = new ArrayList<>(part.facesByTexture);
+
+                float cell = DISTANCE_LOD_CELLS[i];
+                if (type == PartCustomization.PartType.CUBE)
+                    reduceCube(faces, vertices, cell / 2); // only drop cubes much smaller than the cell, so small details like eyes last longer
+                else
+                    reduceMesh(faces, vertices, cell, false);
+
+                // nothing more was removed, share the previous level instead of keeping another copy
+                if (countFaces(faces) >= countFaces(prev.facesByTexture))
+                    lods[i] = prev;
+                else
+                    lods[i] = prev = new FiguraModelPart.Lod(vertices, faces);
+            }
+
+            part.lods = countFaces(prev.facesByTexture) < fullFaces ? lods : null;
+        }
+
+        for (FiguraModelPart child : part.children)
+            buildLods(child);
+    }
+
+    private static int countFaces(List<Integer> facesByTexture) {
+        int count = 0;
+        for (Integer faces : facesByTexture)
+            count += faces;
+        return count;
+    }
+
+    private static long cellKey(Vertex v, float cell) {
+        long x = Math.round(v.x / cell) & 0x1FFFFF;
+        long y = Math.round(v.y / cell) & 0x1FFFFF;
+        long z = Math.round(v.z / cell) & 0x1FFFFF;
+        return (x << 42) | (y << 21) | z;
+    }
+
+    // area of the quad a b c d (two triangles: a b c and a c d)
+    private static float faceArea(Vertex a, Vertex b, Vertex c, Vertex d) {
+        return triangleArea(a, b, c) + triangleArea(a, c, d);
+    }
+
+    private static float triangleArea(Vertex a, Vertex b, Vertex c) {
+        float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+        float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+        float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        return 0.5f * (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
     }
 
     // thanks to Scarlet Light#7611

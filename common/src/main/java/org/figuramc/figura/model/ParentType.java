@@ -2,6 +2,9 @@ package org.figuramc.figura.model;
 
 import org.figuramc.figura.math.vector.FiguraVec3;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 public enum ParentType {
     None("NONE", "Model", "MODEL"),
 
@@ -96,11 +99,29 @@ public enum ParentType {
         this.aliases = aliases;
     }
 
+    private static final ParentType[] VALUES = values();
+    // name lookups are cached, since some addons (Figura Extra Fight) look up every part name on every frame
+    // the names also come from scripts, so the cache is cleared when it grows too big
+    private static final int MAX_CACHED_NAMES = 4096;
+    private static final Map<String, ParentType> BY_NAME = new ConcurrentHashMap<>();
+
     public static ParentType get(String name) {
         if (name == null)
             return None;
 
-        for (ParentType parentType : values()) {
+        ParentType cached = BY_NAME.get(name);
+        if (cached != null)
+            return cached;
+
+        ParentType parentType = find(name);
+        if (BY_NAME.size() >= MAX_CACHED_NAMES)
+            BY_NAME.clear();
+        BY_NAME.put(name, parentType);
+        return parentType;
+    }
+
+    private static ParentType find(String name) {
+        for (ParentType parentType : VALUES) {
             if (name.startsWith(parentType.name()))
                 return parentType;
             for (String alias : parentType.aliases) {

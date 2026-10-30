@@ -9,7 +9,6 @@ import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.gui.overlay.IGuiOverlay;
-import net.minecraftforge.client.gui.overlay.NamedGuiOverlay;
 import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -23,8 +22,12 @@ import org.figuramc.figura.gui.forge.GuiOverlay;
 import org.figuramc.figura.gui.forge.GuiUnderlay;
 import org.figuramc.figura.utils.forge.FiguraResourceListenerImpl;
 
+import net.minecraft.resources.ResourceLocation;
+
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Mod.EventBusSubscriber(modid = FiguraMod.MOD_ID, bus = Mod.EventBusSubscriber.Bus.MOD, value = Dist.CLIENT)
 public class FiguraModClientForge extends FiguraMod {
@@ -36,7 +39,7 @@ public class FiguraModClientForge extends FiguraMod {
         onClientInit();
         ModConfig.registerConfigScreen();
         for (VanillaGuiOverlay overlay : VanillaGuiOverlay.values()) {
-            vanillaOverlays.add(overlay.type());
+            vanillaOverlays.add(overlay.id());
         }
     }
 
@@ -51,10 +54,11 @@ public class FiguraModClientForge extends FiguraMod {
         event.registerBelowAll("figura_underlay", new GuiUnderlay());
     }
 
-    private static final List<NamedGuiOverlay> vanillaOverlays = new ArrayList<>();
+    // ids, in a set: this runs once per overlay per frame
+    private static final Set<ResourceLocation> vanillaOverlays = new HashSet<>();
 
     public static void cancelVanillaOverlays(RenderGuiOverlayEvent.Pre event) {
-        if (vanillaOverlays.contains(event.getOverlay())) {
+        if (vanillaOverlays.contains(event.getOverlay().id())) {
             Entity entity = Minecraft.getInstance().getCameraEntity();
             Avatar avatar = entity == null ? null : AvatarManager.getAvatar(entity);
             if (avatar != null && avatar.luaRuntime != null && !avatar.luaRuntime.renderer.renderHUD) {

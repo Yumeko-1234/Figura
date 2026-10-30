@@ -65,6 +65,8 @@ public abstract class AvatarRenderer {
     public final HashMap<String, FiguraTexture> textures = new HashMap<>();
     public final HashMap<String, FiguraTexture> customTextures = new HashMap<>();
     protected static int shouldRenderPivots;
+    // bumped by scripts changing what a pass check looks at: render functions, parent types and children (see ImmediateAvatarRenderer.canSkipPass)
+    public int structureVersion;
     public boolean allowMatrixUpdate = false;
     public boolean allowHiddenTransforms = true;
     public boolean interceptRendersIntoFigura = true;
@@ -74,6 +76,12 @@ public abstract class AvatarRenderer {
     public boolean offsetRenderLayers = false;
     public boolean ignoreVanillaVisibility = false;
     public FiguraModelPart itemToRender;
+
+    // box {minX, minY, minZ, maxX, maxY, maxZ} in world space around what the world parts drew in their last world pass
+    // null when they drew nothing, used by AvatarCulling
+    public double[] worldPartBounds;
+    // FiguraMod.ticks of that world pass, -1 before the first one
+    public int worldPartBoundsTick = -1;
 
     public AvatarRenderer(Avatar avatar) {
         this.avatar = avatar;
@@ -139,6 +147,17 @@ public abstract class AvatarRenderer {
     public abstract int renderSpecialParts();
     public abstract void updateMatrices();
 
+    public void markTexturesDirty() {
+        for (FiguraTextureSet set : textureSets) {
+            for (FiguraTexture texture : set.textures) {
+                if (texture != null)
+                    texture.markDirty();
+            }
+        }
+        for (FiguraTexture texture : customTextures.values())
+            texture.markDirty();
+    }
+
     protected void clean() {
         for (FiguraTextureSet set : textureSets)
             set.clean();
@@ -155,6 +174,12 @@ public abstract class AvatarRenderer {
     public void sortParts() {
         separatedParts.clear();
         _sortParts(root);
+    }
+
+    // world parts are drawn at their own world position, which can be anywhere instead of around the entity
+    public boolean hasWorldParts() {
+        List<FiguraModelPart> parts = separatedParts.get(ParentType.World);
+        return parts != null && !parts.isEmpty();
     }
 
     private void _sortParts(FiguraModelPart part) {

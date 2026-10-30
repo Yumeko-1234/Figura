@@ -2,13 +2,17 @@ package org.figuramc.figura.model;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.datafixers.util.Pair;
+import org.figuramc.figura.FiguraMod;
+import org.figuramc.figura.config.Configs;
 import org.figuramc.figura.math.matrix.FiguraMat3;
 import org.figuramc.figura.math.matrix.FiguraMat4;
 import org.figuramc.figura.math.vector.FiguraVec3;
 import org.figuramc.figura.model.rendering.texture.FiguraTextureSet;
 import org.figuramc.figura.model.rendering.texture.RenderTypes;
 
-import java.util.Stack;
+import java.util.ArrayList;
+import java.util.EmptyStackException;
+import java.util.List;
 
 public class PartCustomization {
 
@@ -66,6 +70,75 @@ public class PartCustomization {
         if (!needsMatrixRecalculation)
             return;
 
+        // vanilla parents and animations set their values again every frame, even when nothing moved,
+        // so when every input is the same as last time (and the matrices weren't changed since), the result is the same too
+        boolean cached = Configs.CACHE_PART_MATRICES != null && Configs.CACHE_PART_MATRICES.value
+                && matrixCache != null && matrixCache.matches(this);
+        if (cached && !FiguraMod.verifyOptimizations()) {
+            needsMatrixRecalculation = false;
+            return;
+        }
+
+        computeMatrices();
+        needsMatrixRecalculation = false;
+
+        // verifyOptimizations always computes, and reports when the cached result would have been different
+        if (cached && !matrixCache.outputsMatch(this) && !matrixCacheMismatchLogged) {
+            matrixCacheMismatchLogged = true;
+            FiguraMod.LOGGER.warn("Cached part matrix differs from the computed one, please report this\ncomputed: {}\ncached: {}",
+                    positionMatrix, matrixCache.positionMatrix);
+        }
+
+        // most parts are computed once and never again, only the ones computed again get a cache, to save memory
+        if (Configs.CACHE_PART_MATRICES != null && Configs.CACHE_PART_MATRICES.value) {
+            if (matrixCache == null && computedOnce)
+                matrixCache = new MatrixCache();
+            if (matrixCache != null)
+                matrixCache.store(this);
+        }
+        computedOnce = true;
+    }
+
+    private static boolean matrixCacheMismatchLogged;
+    private boolean computedOnce;
+    private MatrixCache matrixCache;
+
+    // the inputs of the last computeMatrices() and what it wrote
+    private static final class MatrixCache {
+        private PartType partType;
+        private final FiguraVec3 position = FiguraVec3.of(), rotation = FiguraVec3.of(), scale = FiguraVec3.of(), pivot = FiguraVec3.of();
+        private final FiguraVec3 offsetPivot = FiguraVec3.of(), offsetPos = FiguraVec3.of(), offsetRot = FiguraVec3.of(), offsetScale = FiguraVec3.of();
+        private final FiguraVec3 animPos = FiguraVec3.of(), animRot = FiguraVec3.of(), animScale = FiguraVec3.of();
+        private final FiguraMat4 positionMatrix = FiguraMat4.of();
+        private final FiguraMat3 normalMatrix = FiguraMat3.of();
+        private final FiguraVec3 stackScale = FiguraVec3.of();
+
+        private void store(PartCustomization c) {
+            partType = c.partType;
+            position.set(c.position); rotation.set(c.rotation); scale.set(c.scale); pivot.set(c.pivot);
+            offsetPivot.set(c.offsetPivot); offsetPos.set(c.offsetPos); offsetRot.set(c.offsetRot); offsetScale.set(c.offsetScale);
+            animPos.set(c.animPos); animRot.set(c.animRot); animScale.set(c.animScale);
+            positionMatrix.set(c.positionMatrix);
+            normalMatrix.set(c.normalMatrix);
+            stackScale.set(c.stackScale);
+        }
+
+        // exact compare, any NaN never matches so it is always computed
+        private boolean matches(PartCustomization c) {
+            return partType == c.partType
+                    && position.equals(c.position) && rotation.equals(c.rotation) && scale.equals(c.scale) && pivot.equals(c.pivot)
+                    && offsetPivot.equals(c.offsetPivot) && offsetPos.equals(c.offsetPos) && offsetRot.equals(c.offsetRot) && offsetScale.equals(c.offsetScale)
+                    && animPos.equals(c.animPos) && animRot.equals(c.animRot) && animScale.equals(c.animScale)
+                    && outputsMatch(c);
+        }
+
+        // the matrices may also be written from outside (setMatrix, the customization stack, voided matrices)
+        private boolean outputsMatch(PartCustomization c) {
+            return positionMatrix.equals(c.positionMatrix) && normalMatrix.equals(c.normalMatrix) && stackScale.equals(c.stackScale);
+        }
+    }
+
+    private void computeMatrices() {
         positionMatrix.reset();
 
         // Position the pivot point at 0, 0, 0, and translate the part
@@ -127,8 +200,6 @@ public class PartCustomization {
                     rotation.z + offsetRot.z + animRot.z
             );
         }
-
-        needsMatrixRecalculation = false;
     }
 
     public void setPos(FiguraVec3 pos) {
@@ -173,6 +244,11 @@ public class PartCustomization {
     }
     public FiguraVec3 getPivot() {
         return pivot.copy();
+    }
+    // writes the pivot into out, optionally with the offset pivot added, without copying (used by the renderer for every part)
+    public FiguraVec3 getPivot(FiguraVec3 out, boolean withOffset) {
+        out.set(pivot);
+        return withOffset ? out.add(offsetPivot) : out;
     }
 
     public void offsetPivot(FiguraVec3 pivot) {
@@ -247,6 +323,14 @@ public class PartCustomization {
         return offsetScale.copy();
     }
 
+    // writes the offsets into the given vectors without copying (used every frame to save and restore the vanilla transforms)
+    public void getOffsets(FiguraVec3 pivot, FiguraVec3 pos, FiguraVec3 rot, FiguraVec3 scale) {
+        pivot.set(offsetPivot);
+        pos.set(offsetPos);
+        rot.set(offsetRot);
+        scale.set(offsetScale);
+    }
+
     public void setAnimPos(double x, double y, double z) {
         animPos.set(x, y, z);
         needsMatrixRecalculation = true;
@@ -271,10 +355,10 @@ public class PartCustomization {
 
     public void setMatrix(FiguraMat4 matrix) {
         positionMatrix.set(matrix);
-        FiguraMat3 temp = matrix.deaugmented();
-        temp.invert();
-        temp.transpose();
-        normalMatrix.set(temp);
+        // normal matrix = inverse transpose of the 3x3 part, computed in place instead of on a deaugmented copy
+        normalMatrix.set(matrix.v11, matrix.v21, matrix.v31, matrix.v12, matrix.v22, matrix.v32, matrix.v13, matrix.v23, matrix.v33);
+        normalMatrix.invert();
+        normalMatrix.transpose();
         needsMatrixRecalculation = false;
     }
 
@@ -340,6 +424,38 @@ public class PartCustomization {
         target.secondaryTexture = secondaryTexture;
     }
 
+    // sets this to parent with other applied on top: the same values as parent.copyTo(this) followed by this.modify(other)
+    // for the fields a stack entry is read for (matrices, scale, colors, render state), without copying the matrices first
+    // pos, rot, scale, pivot and the offsets are left as they are: a stack entry never recalculates and nothing reads them
+    public void setComposed(PartCustomization parent, PartCustomization other) {
+        partType = parent.partType;
+        positionMatrix.setProduct(parent.positionMatrix, other.positionMatrix);
+        uvMatrix.setProduct(parent.uvMatrix, other.uvMatrix);
+        normalMatrix.setProduct(parent.normalMatrix, other.normalMatrix);
+
+        primaryRenderType = other.primaryRenderType != null ? other.primaryRenderType : parent.primaryRenderType;
+        secondaryRenderType = other.secondaryRenderType != null ? other.secondaryRenderType : parent.secondaryRenderType;
+
+        visible = other.visible;
+        vanillaVisible = other.vanillaVisible != null ? other.vanillaVisible : parent.vanillaVisible;
+        light = other.light != null ? other.light : parent.light;
+        overlay = other.overlay != null ? other.overlay : parent.overlay;
+
+        if (other.alpha != null)
+            alpha = parent.alpha != null ? parent.alpha * other.alpha : other.alpha;
+        else
+            alpha = parent.alpha;
+
+        stackScale.set(parent.stackScale).multiply(other.stackScale);
+        color.set(parent.color).multiply(other.color);
+        color2.set(parent.color2).multiply(other.color2);
+
+        primaryTexture = other.primaryTexture != null ? other.primaryTexture : parent.primaryTexture;
+        secondaryTexture = other.secondaryTexture != null ? other.secondaryTexture : parent.secondaryTexture;
+
+        needsMatrixRecalculation = false;
+    }
+
     // Modify this object using the information contained in the other object
     public void modify(PartCustomization other) {
         positionMatrix.rightMultiply(other.positionMatrix);
@@ -399,32 +515,39 @@ public class PartCustomization {
 
     public static class PartCustomizationStack {
 
-        private final Stack<PartCustomization> stack = new Stack<>() {{
+        // entries are kept after a pop and reused by the next push at the same depth,
+        // since a new customization (with all its matrices and vectors) for every part, every frame, keeps the GC busy
+        // so an entry returned by peek() is only valid until it is popped, keep a copy to use it later
+        private final List<PartCustomization> stack = new ArrayList<>() {{
             add(new PartCustomization());
         }};
+        private int size = 1;
 
         public void push(PartCustomization customization) {
-            // copy stack
-            PartCustomization newCustomization = new PartCustomization();
-            stack.peek().copyTo(newCustomization);
+            if (size == stack.size())
+                stack.add(new PartCustomization());
 
-            // modify
-            newCustomization.modify(customization);
+            // the parent entry with the customization applied on top
+            stack.get(size).setComposed(stack.get(size - 1), customization);
 
             // add
-            stack.push(newCustomization);
+            size++;
         }
 
         public void pop() {
-            stack.pop();
+            if (size <= 0)
+                throw new EmptyStackException();
+            size--;
         }
 
         public PartCustomization peek() {
-            return stack.peek();
+            if (size <= 0)
+                throw new EmptyStackException();
+            return stack.get(size - 1);
         }
 
         public boolean isEmpty() {
-            return stack.size() == 1;
+            return size == 1;
         }
     }
 }

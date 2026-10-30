@@ -9,6 +9,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.LevelReader;
 import org.figuramc.figura.avatar.Avatar;
 import org.figuramc.figura.avatar.AvatarManager;
+import org.figuramc.figura.compat.EpicFightPoseThrottle;
 import org.figuramc.figura.utils.RenderUtils;
 import org.figuramc.figura.utils.ui.UIHelper;
 import org.spongepowered.asm.mixin.Mixin;
@@ -28,7 +29,7 @@ public class EntityRenderDispatcherMixin {
 
     @Inject(method = "renderFlame", at = @At("HEAD"), cancellable = true)
     private void renderFlame(PoseStack stack, MultiBufferSource multiBufferSource, Entity entity, CallbackInfo ci) {
-        Avatar a = AvatarManager.getAvatar(entity);
+        Avatar a = AvatarManager.getAvatarForRender(entity);
         if (RenderUtils.vanillaModelAndScript(a)) {
             if (!a.luaRuntime.renderer.renderFire) {
                 ci.cancel();
@@ -58,7 +59,7 @@ public class EntityRenderDispatcherMixin {
 
     @ModifyVariable(method = "renderShadow", at = @At("HEAD"), ordinal = 2, argsOnly = true)
     private static float modifyShadowSize(float h, PoseStack poseStack, MultiBufferSource multiBufferSource, Entity entity, float f, float g, LevelReader levelReader) {
-        Avatar avatar = AvatarManager.getAvatar(entity);
+        Avatar avatar = AvatarManager.getAvatarForRender(entity);
         if (RenderUtils.vanillaModelAndScript(avatar) && avatar.luaRuntime.renderer.shadowRadius != null)
             return avatar.luaRuntime.renderer.shadowRadius;
         return h;
@@ -66,6 +67,8 @@ public class EntityRenderDispatcherMixin {
 
     @Inject(method = "render", at = @At("HEAD"), cancellable = true)
     private <E extends Entity> void render(E entity, double d, double e, double f, float g, float h, PoseStack poseStack, MultiBufferSource multiBufferSource, int i, CallbackInfo ci) {
+        EpicFightPoseThrottle.endEntity();
+
         if (this.camera == null)
             ci.cancel();
 
@@ -73,7 +76,7 @@ public class EntityRenderDispatcherMixin {
         if (owner == null)
             return;
 
-        Avatar avatar = AvatarManager.getAvatar(owner);
+        Avatar avatar = AvatarManager.getAvatarForRender(owner);
         if (RenderUtils.vanillaModelAndScript(avatar) && !avatar.luaRuntime.renderer.renderVehicle)
             ci.cancel();
     }

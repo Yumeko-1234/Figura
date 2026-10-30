@@ -90,7 +90,7 @@ public abstract class PlayerRendererMixin extends LivingEntityRenderer<AbstractC
             return text;
 
         // text
-        Avatar avatar = AvatarManager.getAvatarForPlayer(player.getUUID());
+        Avatar avatar = AvatarManager.getAvatarForPlayerRender(player.getUUID());
         EntityNameplateCustomization custom = avatar == null || avatar.luaRuntime == null ? null : avatar.luaRuntime.nameplate.ENTITY;
 
         // customization boolean, which also is the permission check
@@ -135,7 +135,7 @@ public abstract class PlayerRendererMixin extends LivingEntityRenderer<AbstractC
             return;
 
         // get customizations
-        Avatar avatar = AvatarManager.getAvatarForPlayer(player.getUUID());
+        Avatar avatar = AvatarManager.getAvatarForPlayerRender(player.getUUID());
         EntityNameplateCustomization custom = avatar == null || avatar.luaRuntime == null ? null : avatar.luaRuntime.nameplate.ENTITY;
 
         // customization boolean, which also is the permission check
@@ -155,7 +155,7 @@ public abstract class PlayerRendererMixin extends LivingEntityRenderer<AbstractC
         // If the user has an avatar equipped, figura nameplate rendering will be enabled so the profiler is pushed
         if (hasCustom) {
             FiguraMod.pushProfiler(FiguraMod.MOD_ID);
-            FiguraMod.pushProfiler(player.getName().getString());
+            FiguraMod.pushProfiler(FiguraMod.isProfilerActive() ? player.getName().getString() : "player");
             FiguraMod.pushProfiler("nameplate");
         }
     }
@@ -164,7 +164,7 @@ public abstract class PlayerRendererMixin extends LivingEntityRenderer<AbstractC
 
     @Inject(at = @At(value = "INVOKE", shift = At.Shift.AFTER, target = "Lnet/minecraft/client/model/PlayerModel;setupAnim(Lnet/minecraft/world/entity/LivingEntity;FFFFF)V"), method = "renderHand")
     private void onRenderHand(PoseStack stack, MultiBufferSource multiBufferSource, int light, AbstractClientPlayer player, ModelPart arm, ModelPart sleeve, CallbackInfo ci) {
-        avatar = AvatarManager.getAvatarForPlayer(player.getUUID());
+        avatar = AvatarManager.getAvatarToRender(player.getUUID());
         if (avatar != null && avatar.luaRuntime != null) {
             VanillaPart part = avatar.luaRuntime.vanilla_model.PLAYER;
             PlayerModel<AbstractClientPlayer> model = this.getModel();
@@ -194,7 +194,7 @@ public abstract class PlayerRendererMixin extends LivingEntityRenderer<AbstractC
 
     @Inject(method = "setupRotations", at = @At("HEAD"), cancellable = true)
     private void setupRotations(AbstractClientPlayer entity, PoseStack poseStack, float f, float f2, float f3, CallbackInfo cir) {
-        Avatar avatar = AvatarManager.getAvatar(entity);
+        Avatar avatar = AvatarManager.getAvatarForRender(entity);
         if (RenderUtils.vanillaModelAndScript(avatar) && !avatar.luaRuntime.renderer.getRootRotationAllowed()) {
             cir.cancel();
         }

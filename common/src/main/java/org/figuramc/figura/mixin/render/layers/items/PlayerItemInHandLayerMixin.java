@@ -48,7 +48,7 @@ public abstract class PlayerItemInHandLayerMixin <T extends Player, M extends En
 
         boolean left = humanoidArm == HumanoidArm.LEFT;
 
-        Avatar avatar = AvatarManager.getAvatar(livingEntity);
+        Avatar avatar = AvatarManager.getAvatarForRender(livingEntity);
         if (!RenderUtils.renderArmItem(avatar, left, ci))
             return;
 

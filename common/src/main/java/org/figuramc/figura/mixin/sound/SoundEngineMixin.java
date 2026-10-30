@@ -115,7 +115,8 @@ public abstract class SoundEngineMixin implements SoundEngineAccessor {
         if (sound.isRelative() || sound.getAttenuation() == Attenuation.NONE || this.listener.getListenerPosition().distanceToSqr(pos) < (double)(g * g)){
             // Run sound event
             AvatarManager.executeAll("playSoundEvent", avatar -> {
-                boolean cancel = avatar.playSoundEvent(
+                // the event args are only built for avatars listening to it
+                boolean cancel = avatar.hasListeners("ON_PLAY_SOUND") && avatar.playSoundEvent(
                     sound.getLocation().toString(),
                     FiguraVec3.fromVec3(pos),
                     sound.getVolume(), sound.getPitch(),

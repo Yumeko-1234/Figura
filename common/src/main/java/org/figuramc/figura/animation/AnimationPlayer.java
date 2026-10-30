@@ -14,6 +14,7 @@ public class AnimationPlayer {
         if (anim.playState == Animation.PlayState.STOPPED)
             return limit;
 
+        anim.animatedParts = true;
         FiguraMod.pushProfiler(anim.name);
 
         if (anim.playState != Animation.PlayState.PAUSED)
@@ -100,6 +101,11 @@ public class AnimationPlayer {
     }
 
     public static void clear(Animation anim) {
+        // most animations of an avatar are stopped, their parts were never touched
+        if (!anim.animatedParts)
+            return;
+        anim.animatedParts = false;
+
         FiguraVec3 zero = FiguraVec3.of();
         for (Map.Entry<FiguraModelPart, List<Animation.AnimationChannel>> entry : anim.animationParts) {
             FiguraModelPart part = entry.getKey();

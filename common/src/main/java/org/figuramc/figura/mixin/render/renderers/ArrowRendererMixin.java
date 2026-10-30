@@ -30,7 +30,7 @@ public abstract class ArrowRendererMixin<T extends AbstractArrow> extends Entity
         if (owner == null)
             return;
 
-        Avatar avatar = AvatarManager.getAvatar(owner);
+        Avatar avatar = AvatarManager.getAvatarForRender(owner);
         if (avatar == null || avatar.permissions.get(Permissions.VANILLA_MODEL_EDIT) == 0)
             return;
 
@@ -39,7 +39,7 @@ public abstract class ArrowRendererMixin<T extends AbstractArrow> extends Entity
         FiguraMod.pushProfiler("arrowRender");
 
         FiguraMod.pushProfiler("event");
-        boolean bool = avatar.arrowRenderEvent(tickDelta, EntityAPI.wrap(abstractArrow));
+        boolean bool = avatar.hasListeners("ARROW_RENDER") && avatar.arrowRenderEvent(tickDelta, EntityAPI.wrap(abstractArrow));
 
         FiguraMod.popPushProfiler("render");
         if (bool || avatar.renderArrow(poseStack, multiBufferSource, tickDelta, light)) {

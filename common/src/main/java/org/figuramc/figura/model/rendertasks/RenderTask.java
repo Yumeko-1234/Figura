@@ -51,6 +51,11 @@ public abstract class RenderTask {
         return customization.visible;
     }
 
+    // the transform of this task relative to its part, as of its last render (not a copy, don't edit it)
+    public FiguraMat4 getRenderedMatrix() {
+        return customization.positionMatrix;
+    }
+
 
     // -- lua stuff -- // 
 
