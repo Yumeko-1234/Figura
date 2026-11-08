@@ -159,12 +159,19 @@ public class LuaClosure extends LuaFunction {
 
 	@Override
 	public final LuaValue call() {
+		// [bh] compiled: the arguments go straight to the compiled code, no stack array (CompiledFunction.run)
+		CompiledFunction f = p.compiled;
+		if (f != null && CompiledFunction.direct(this))
+			return f.run(this, null, NIL, NIL, NIL, NONE).arg1();
 		LuaValue[] stack = getNewStack();
 		return execute(stack, NONE).arg1();
 	}
 
 	@Override
 	public final LuaValue call(LuaValue arg) {
+		CompiledFunction f = p.compiled;
+		if (f != null && CompiledFunction.direct(this))
+			return (p.numparams == 0? f.run(this, null, NIL, NIL, NIL, arg): f.run(this, null, arg, NIL, NIL, NONE)).arg1();
 		LuaValue[] stack = getNewStack();
 		switch (p.numparams) {
 		default:
@@ -177,6 +184,14 @@ public class LuaClosure extends LuaFunction {
 
 	@Override
 	public final LuaValue call(LuaValue arg1, LuaValue arg2) {
+		CompiledFunction f = p.compiled;
+		if (f != null && CompiledFunction.direct(this)) {
+			switch (p.numparams) {
+			default: return f.run(this, null, arg1, arg2, NIL, NONE).arg1();
+			case 1: return f.run(this, null, arg1, NIL, NIL, arg2).arg1();
+			case 0: return f.run(this, null, NIL, NIL, NIL, p.is_vararg != 0? varargsOf(arg1, arg2): NONE).arg1();
+			}
+		}
 		LuaValue[] stack = getNewStack();
 		switch (p.numparams) {
 		default:
@@ -193,6 +208,15 @@ public class LuaClosure extends LuaFunction {
 
 	@Override
 	public final LuaValue call(LuaValue arg1, LuaValue arg2, LuaValue arg3) {
+		CompiledFunction f = p.compiled;
+		if (f != null && CompiledFunction.direct(this)) {
+			switch (p.numparams) {
+			default: return f.run(this, null, arg1, arg2, arg3, NONE).arg1();
+			case 2: return f.run(this, null, arg1, arg2, NIL, arg3).arg1();
+			case 1: return f.run(this, null, arg1, NIL, NIL, p.is_vararg != 0? varargsOf(arg2, arg3): NONE).arg1();
+			case 0: return f.run(this, null, NIL, NIL, NIL, p.is_vararg != 0? varargsOf(arg1, arg2, arg3): NONE).arg1();
+			}
+		}
 		LuaValue[] stack = getNewStack();
 		switch (p.numparams) {
 		default:
@@ -219,6 +243,12 @@ public class LuaClosure extends LuaFunction {
 
 	@Override
 	public final Varargs onInvoke(Varargs varargs) {
+		CompiledFunction f = p.compiled;
+		if (f != null && CompiledFunction.direct(this)) {
+			int np = p.numparams;
+			return f.run(this, null, np > 0? varargs.arg(1): NIL, np > 1? varargs.arg(2): NIL, np > 2? varargs.arg(3): NIL,
+				p.is_vararg != 0? varargs.subargs(np+1): NONE);
+		}
 		LuaValue[] stack = getNewStack();
 		for (int i = 0; i < p.numparams; i++)
 			stack[i] = varargs.arg(i+1);

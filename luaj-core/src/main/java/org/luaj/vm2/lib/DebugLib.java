@@ -532,6 +532,42 @@ public class DebugLib extends TwoArgFunction {
 			callHook(s, COUNT, NIL);
 	}
 
+	// [bh] compiled code (CompiledFunction): pushes the frame like onCall and returns it, null when none was pushed (inside a hook);
+	// the frame remembers its call stack and hook state so counting and returning need no lookups
+	public CallFrame enterCompiled(LuaClosure c, Varargs varargs, LuaValue[] stack) {
+		LuaThread t = globals.running;
+		LuaThread.State s = t.state;
+		if (s.inhook)
+			return null;
+		CallStack cs = callstack(t);
+		CallFrame f = cs.pushcall();
+		f.set(c, varargs, stack);
+		f.owner = cs;
+		f.state = s;
+		f.lib = this;
+		if (s.hookcall)
+			callHook(s, CALL, NIL);
+		return f;
+	}
+
+	// [bh] compiled code: n instructions about to run in the frame's function, like onInstructions
+	public static void countCompiled(CallFrame f, int n) {
+		LuaThread.State s = f.state;
+		if (s.hookcount <= 0)
+			return;
+		f.lib.onInstructions(s, n);
+	}
+
+	// [bh] compiled code: pops the frame enterCompiled pushed, like onReturn
+	public static void exitCompiled(CallFrame f) {
+		LuaThread.State s = f.state;
+		if (s.inhook)
+			return;
+		f.owner.onReturn();
+		if (s.hookrtrn)
+			f.lib.callHook(s, RETURN, NIL);
+	}
+
 	// [bh] the frame onCall pushed for the running closure, null when none was pushed (inside a hook)
 	public CallFrame topFrame(LuaThread.State s) {
 		if (s.inhook)
@@ -778,6 +814,10 @@ public class DebugLib extends TwoArgFunction {
 		Varargs     v;
 		LuaValue[]  stack = EMPTY;
 		CallFrame   previous;
+		// [bh] set by enterCompiled
+		CallStack owner;
+		LuaThread.State state;
+		DebugLib lib;
 
 		void set(LuaClosure function, Varargs varargs, LuaValue[] stack) {
 			this.f = function;

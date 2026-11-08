@@ -28,8 +28,25 @@ public abstract class CompiledFunction {
 
 	protected CompiledFunction() {}
 
-	/** Runs the function for the closure, like LuaClosure.execute. */
-	protected abstract Varargs execute(LuaClosure cl, LuaValue[] stack, Varargs varargs);
+	/**
+	 * Runs the function for the closure, like LuaClosure.execute.
+	 * <p>
+	 * The first three parameters come as x0, x1, x2 (nil beyond the parameters), so calls with up to three parameters need no
+	 * stack array: stack is null then and the code makes one only when the function needs one (captured registers, instructions
+	 * reading ranges of registers). Functions with more parameters always get the stack array holding them all.
+	 */
+	protected abstract Varargs run(LuaClosure cl, LuaValue[] stack, LuaValue x0, LuaValue x1, LuaValue x2, Varargs varargs);
+
+	/** Runs the function with the parameters already in the stack array, like LuaClosure.execute. */
+	final Varargs execute(LuaClosure cl, LuaValue[] stack, Varargs varargs) {
+		int np = cl.p.numparams;
+		return run(cl, stack, np > 0? stack[0]: LuaValue.NIL, np > 1? stack[1]: LuaValue.NIL, np > 2? stack[2]: LuaValue.NIL, varargs);
+	}
+
+	/** Direct calls skip the stack array, up to three parameters (see {@link #run}). */
+	static boolean direct(LuaClosure cl) {
+		return cl.p.numparams <= 3 && !mustInterpret(cl.globals);
+	}
 
 	// called by LuaClosure.execute while interpreting
 	static void called(Prototype p) {
@@ -51,24 +68,32 @@ public abstract class CompiledFunction {
 
 	// -- entry and exit, the same as LuaClosure.execute -- //
 
-	/** Pushes the call frame, returns the running coroutine's hook state, null without the debug library. */
-	protected static LuaThread.State enter(LuaClosure cl, LuaValue[] stack, Varargs varargs) {
+	private static final LuaValue[] NO_STACK = {};
+
+	/** A stack array for a direct call that needs one (see {@link #run}): nil, with the first parameters. */
+	protected static LuaValue[] newStack(LuaClosure cl, LuaValue x0, LuaValue x1, LuaValue x2) {
+		Prototype p = cl.p;
+		LuaValue[] stack = new LuaValue[p.maxstacksize];
+		java.util.Arrays.fill(stack, LuaValue.NIL);
+		int np = Math.min(p.numparams, stack.length);
+		if (np > 0) stack[0] = x0;
+		if (np > 1) stack[1] = x1;
+		if (np > 2) stack[2] = x2;
+		return stack;
+	}
+
+	/** Pushes the call frame, null without the debug library or inside a hook. */
+	protected static DebugLib.CallFrame enter(LuaClosure cl, LuaValue[] stack, Varargs varargs) {
 		Globals g = cl.globals;
 		if (g == null || g.debuglib == null)
 			return null;
-		g.debuglib.onCall(cl, varargs, stack);
-		return g.running.state;
-	}
-
-	/** The call frame pushed by {@link #enter}, null when none was. */
-	protected static DebugLib.CallFrame frame(LuaClosure cl, LuaThread.State s) {
-		return s == null? null: cl.globals.debuglib.topFrame(s);
+		return g.debuglib.enterCompiled(cl, varargs, stack == null? NO_STACK: stack);
 	}
 
 	/** n instructions about to run, for the count hook. */
-	protected static void count(LuaClosure cl, LuaThread.State s, int n) {
-		if (s != null)
-			cl.globals.debuglib.onInstructions(s, n);
+	protected static void count(DebugLib.CallFrame frame, int n) {
+		if (frame != null)
+			DebugLib.countCompiled(frame, n);
 	}
 
 	/** The instruction running, for the traceback and error position, when a call or an error can happen. */
@@ -78,14 +103,13 @@ public abstract class CompiledFunction {
 	}
 
 	/** On every return: closes the upvalues still open and pops the call frame. */
-	protected static void exit(LuaClosure cl, UpValue[] openups) {
+	protected static void exit(UpValue[] openups, DebugLib.CallFrame frame) {
 		if (openups != null)
 			for (int u = openups.length; --u >= 0;)
 				if (openups[u] != null)
 					openups[u].close();
-		Globals g = cl.globals;
-		if (g != null && g.debuglib != null)
-			g.debuglib.onReturn();
+		if (frame != null)
+			DebugLib.exitCompiled(frame);
 	}
 
 	/** On an exception: the same error handling as the interpreter, then {@link #exit}; returns what to throw. */
@@ -106,7 +130,7 @@ public abstract class CompiledFunction {
 			}
 			return t;
 		} finally {
-			exit(cl, openups);
+			exit(openups, frame);
 		}
 	}
 
