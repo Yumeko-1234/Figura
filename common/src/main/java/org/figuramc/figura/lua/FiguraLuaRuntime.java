@@ -79,6 +79,13 @@ public class FiguraLuaRuntime {
         userGlobals.load(new JseMathLib());
 
         LuaC.install(userGlobals);
+        // script constants share the pooled key instances, see LuaStringInterner
+        Globals.Compiler compiler = userGlobals.compiler;
+        userGlobals.compiler = (stream, chunkName) -> {
+            Prototype prototype = compiler.compile(stream, chunkName);
+            LuaStringInterner.internConstants(prototype);
+            return prototype;
+        };
 
         userGlobals.load(new DebugLib());
         LuaTable debugLib = userGlobals.get("debug").checktable();
@@ -95,6 +102,8 @@ public class FiguraLuaRuntime {
         LuaTable figuraMetatables = new LuaTable();
         typeManager.dumpMetatables(figuraMetatables);
         setGlobal("figuraMetatables", figuraMetatables);
+
+        LuaStringInterner.internGlobals(userGlobals);
     }
 
     public void registerClass(Class<?> clazz) {

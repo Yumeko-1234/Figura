@@ -425,8 +425,6 @@
     "figura.config.full_detail_avatars.tooltip": "Only this many of the closest visible avatars are drawn at full detail, the others lose one detail step for every extra group of this size, even when close\nKeeps crowds smooth\n0 removes the limit",
     "figura.config.full_rate_animations": "Full Rate Players",
     "figura.config.full_rate_animations.tooltip": "Only this many of the closest players have their avatars and Epic Fight animations updated every frame, the others every second frame\nThey still move and turn smoothly, only their avatar parts, limbs and the moving parts of their GeckoLib items animate at half rate\nKeeps crowds smooth\n0 removes the limit",
-    "figura.config.unload_unused_avatars": "Unload Unused Avatars After (s)",
-    "figura.config.unload_unused_avatars.tooltip": "Other players' avatars that nothing drew for this many seconds (player far away, offline, or only seen in the tab list or chat) are unloaded, freeing their textures, sounds and scripts\nOtherwise every avatar seen since joining stays in memory until you disconnect\nThey load again (from the cache when unchanged) as soon as the player is in view\nTheir custom tab list and chat names only show while loaded\n0 keeps every avatar loaded",
     "figura.config.replay_crowd_avatars": "Repeat Crowd Avatar Frames",
     "figura.config.replay_crowd_avatars.tooltip": "Beyond the closest Full Rate Players, avatars are drawn from their model every second frame only, the frame in between repeats what was drawn, moved along with the player\nThe player still moves and turns every frame, only the avatar animates at half rate\nRoughly halves what a crowd costs to draw, turn it off if an avatar looks wrong",
     "figura.config.geckolib_item_cache": "GeckoLib Item Cache",

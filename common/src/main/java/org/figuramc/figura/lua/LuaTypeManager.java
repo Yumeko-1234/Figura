@@ -4,6 +4,9 @@ import net.minecraft.network.chat.Component;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.lua.docs.FiguraDocsManager;
 import org.figuramc.figura.lua.docs.LuaTypeDoc;
+import org.figuramc.figura.math.vector.FiguraVec2;
+import org.figuramc.figura.math.vector.FiguraVec3;
+import org.figuramc.figura.math.vector.FiguraVec4;
 import org.luaj.vm2.*;
 import org.luaj.vm2.lib.OneArgFunction;
 import org.luaj.vm2.lib.TwoArgFunction;
@@ -25,6 +28,38 @@ public class LuaTypeManager {
     // what javaToLua does only depends on the class, so the next value of that class goes straight to the userdata
     private final Map<Class<?>, LuaTable> wrapCache = new java.util.concurrent.ConcurrentHashMap<>();
     private static boolean wrapMismatchLogged;
+
+    // v.x and the like, read directly: no vector method has a one character name, so a one character key on a vector is always
+    // a component (the same ones as FiguraVec2/3/4.__index), this skips the method table lookup, the reflective call and a Java string
+    // physics scripts read vector components thousands of times per frame, null when the key is anything else
+    private static LuaValue vectorComponent(LuaValue self, LuaValue key) {
+        if (!(key instanceof LuaString s) || s.m_length != 1 || !(self instanceof LuaUserdata u))
+            return null;
+        char c = (char) s.m_bytes[s.m_offset];
+        Object o = u.m_instance;
+        if (o instanceof FiguraVec3 v) return switch (c) {
+            case '1', 'x', 'r' -> valueOf(v.x);
+            case '2', 'y', 'g' -> valueOf(v.y);
+            case '3', 'z', 'b' -> valueOf(v.z);
+            case '_' -> ZERO;
+            default -> null;
+        };
+        if (o instanceof FiguraVec2 v) return switch (c) {
+            case '1', 'x', 'r' -> valueOf(v.x);
+            case '2', 'y', 'g' -> valueOf(v.y);
+            case '_' -> ZERO;
+            default -> null;
+        };
+        if (o instanceof FiguraVec4 v) return switch (c) {
+            case '1', 'x', 'r' -> valueOf(v.x);
+            case '2', 'y', 'g' -> valueOf(v.y);
+            case '3', 'z', 'b' -> valueOf(v.z);
+            case '4', 'w', 'a' -> valueOf(v.w);
+            case '_' -> ZERO;
+            default -> null;
+        };
+        return null;
+    }
 
     public void generateMetatableFor(Class<?> clazz) {
         if (metatables.containsKey(clazz))
@@ -55,6 +90,9 @@ public class LuaTypeManager {
                                 final LuaFunction wrappedIndexer = getWrapper(method);
                                 @Override
                                 public LuaValue call(LuaValue arg1, LuaValue arg2) {
+                                    LuaValue fast = vectorComponent(arg1, arg2);
+                                    if (fast != null)
+                                        return fast;
                                     LuaValue result = indexTable.get(arg2);
                                     if (result == LuaValue.NIL)
                                         result = wrappedIndexer.call(arg1, arg2);
@@ -66,7 +104,7 @@ public class LuaTypeManager {
                         }
                     }
                 } else { // regular methods
-                    indexTable.set(name, getWrapper(method));
+                    indexTable.set(LuaStringInterner.intern(name), getWrapper(method));
                 }
             }
             currentClass = currentClass.getSuperclass();

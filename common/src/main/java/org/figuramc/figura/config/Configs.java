@@ -149,7 +149,6 @@ public class Configs {
             AVATAR_RENDER_SCRIPT_INTERVAL = new ConfigType.PositiveIntConfig("avatar_render_script_interval", RENDERING, 2),
             FULL_DETAIL_AVATARS = new ConfigType.PositiveIntConfig("full_detail_avatars", RENDERING, 2),
             FULL_RATE_ANIMATIONS = new ConfigType.PositiveIntConfig("full_rate_animations", RENDERING, 4),
-            UNLOAD_UNUSED_AVATARS = new ConfigType.PositiveIntConfig("unload_unused_avatars", RENDERING, 60),
             FAR_SCRIPT_INTERVAL = new ConfigType.PositiveIntConfig("far_script_interval", RENDERING, 16),
             AVATAR_TEXTURE_SIZE = new ConfigType.PositiveIntConfig("avatar_texture_size", RENDERING, 1024) {
                 @Override

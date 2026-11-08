@@ -56,6 +56,33 @@ public class EntityAPI<T extends Entity> {
 
     private String cacheType;
 
+    // getNbt saves the whole entity, every mod capability included (Epic Fight, Origins...), avatars that call it every tick or frame
+    // paid that each time: the saved tag is kept for the rest of the game tick, client entities only change on ticks and packets
+    // (only the client thread, the cache is not thread safe; each call still gets its own new Lua table)
+    private static final java.util.IdentityHashMap<Entity, CompoundTag> NBT_CACHE = new java.util.IdentityHashMap<>();
+    private static long nbtCacheTime = Long.MIN_VALUE;
+
+    private static CompoundTag savedNbt(Entity entity) {
+        Minecraft mc = Minecraft.getInstance();
+        if (!mc.isSameThread()) {
+            CompoundTag tag = new CompoundTag();
+            entity.saveWithoutId(tag);
+            return tag;
+        }
+        long time = entity.level().getGameTime();
+        if (time != nbtCacheTime) {
+            NBT_CACHE.clear();
+            nbtCacheTime = time;
+        }
+        CompoundTag tag = NBT_CACHE.get(entity);
+        if (tag == null) {
+            tag = new CompoundTag();
+            entity.saveWithoutId(tag);
+            NBT_CACHE.put(entity, tag);
+        }
+        return tag;
+    }
+
     public EntityAPI(T entity) {
         this.entity = entity;
         entityUUID = entity.getUUID();
@@ -366,9 +393,7 @@ public class EntityAPI<T extends Entity> {
     @LuaMethodDoc("entity.get_nbt")
     public LuaTable getNbt() {
         checkEntity();
-        CompoundTag tag = new CompoundTag();
-        entity.saveWithoutId(tag);
-        return (LuaTable) NbtToLua.convert(tag);
+        return (LuaTable) NbtToLua.convert(savedNbt(entity));
     }
 
     @LuaWhitelist

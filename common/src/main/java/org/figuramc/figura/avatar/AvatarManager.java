@@ -43,9 +43,6 @@ public class AvatarManager {
     // users whose backend fetch failed (expired token, backend hiccup), fetched again once the tick is reached
     private static final Map<UUID, Integer> FETCH_RETRY = new ConcurrentHashMap<>();
 
-    // tick since when each loaded user has been missing from the server, see unloadUnusedAvatars
-    private static final Map<UUID, Integer> OFFLINE_SINCE = new HashMap<>();
-
     private static final Map<Entity, Avatar> LOADED_CEM = new ConcurrentHashMap<>();
     // reused list of the avatars to tick this tick
     private static final List<Avatar> TICKING = new ArrayList<>();
@@ -126,7 +123,7 @@ public class AvatarManager {
             });
         }
 
-        unloadUnusedAvatars();
+        loadNearbyAvatars();
 
         // tick the avatars
         TICKING.clear();
@@ -194,63 +191,6 @@ public class AvatarManager {
         }
     }
 
-    // unloads the avatars nothing rendered for longer than the config allows: their player is far away, offline,
-    // or was only seen in the tab list or chat (which fetch the user data but no longer load the avatar)
-    // nothing else ever unloads them: without this every avatar seen since joining stays in memory until the client disconnects,
-    // and their textures (native images), sounds and scripts add up on servers where many players come and go
-    // the user data stays while the player is online, so the avatar comes back from the disk cache as soon as it is in view again;
-    // players gone from the server are forgotten entirely, PlayerSocialManagerMixin fetches them again when they return
-    private static void unloadUnusedAvatars() {
-        int seconds = Configs.UNLOAD_UNUSED_AVATARS.value;
-        Minecraft minecraft = Minecraft.getInstance();
-        if (seconds <= 0 || minecraft.getConnection() == null || minecraft.level == null) {
-            OFFLINE_SINCE.clear();
-            return;
-        }
-        if (FiguraMod.ticks % 20 != 0)
-            return;
-
-        UUID local = FiguraMod.getLocalPlayerUUID();
-        int now = FiguraMod.ticks;
-        int limit = seconds * 20;
-        for (Map.Entry<UUID, UserData> entry : LOADED_USERS.entrySet()) {
-            UUID id = entry.getKey();
-            UserData user = entry.getValue();
-            if (id.equals(local))
-                continue;
-
-            // a player in the world and close enough keeps (and gets) the avatar loaded even while nothing draws it,
-            // eg. behind a wall, so it does not unload and come back with a delay when they are seen again
-            Player player = minecraft.level.getPlayerByUUID(id);
-            if (player != null && withinLoadDistance(player)) {
-                OFFLINE_SINCE.remove(id);
-                user.want();
-                continue;
-            }
-
-            // the tab list covers the whole server, the world check covers servers that hide players from it
-            boolean online = minecraft.getConnection().getPlayerInfo(id) != null || player != null;
-            if (online) {
-                OFFLINE_SINCE.remove(id);
-                if (user.hasAvatars() && now - user.lastWanted >= limit) {
-                    user.unloadAvatars();
-                    FiguraMod.debug("Unloaded unused avatars of " + id);
-                }
-                continue;
-            }
-
-            Integer since = OFFLINE_SINCE.putIfAbsent(id, now);
-            if (since == null || now - since < limit)
-                continue;
-
-            clearAvatars(id);
-            LOADED_USERS.remove(id);
-            FETCH_RETRY.remove(id);
-            OFFLINE_SINCE.remove(id);
-            FiguraMod.debug("Unloaded avatars of offline player " + id);
-        }
-    }
-
     public static void executeAll(String src, Consumer<Avatar> consumer) {
         if (panic) return;
 
@@ -303,6 +243,17 @@ public class AvatarManager {
             return true;
         double distance = max + LOAD_DISTANCE_MARGIN;
         return player.distanceToSqr(camera) <= distance * distance;
+    }
+
+    // once a second, every player within the avatar render distance (plus the margin) gets its avatar loaded, even before anything
+    // draws it (behind the camera, behind a wall), so it shows as soon as it comes into view; avatars are never unloaded
+    private static void loadNearbyAvatars() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (panic || minecraft.level == null || FiguraMod.ticks % 20 != 0)
+            return;
+        for (Player player : minecraft.level.players())
+            if (withinLoadDistance(player))
+                getAvatarToRender(player.getUUID());
     }
 
     // same, for the paths that draw the avatar (player entity, skull, first person hand): loads it and keeps it loaded
@@ -409,7 +360,6 @@ public class AvatarManager {
         LOADED_USERS.clear();
         FETCHED_USERS.clear();
         FETCH_RETRY.clear();
-        OFFLINE_SINCE.clear();
         clearCEMAvatars();
 
         localUploaded = true;

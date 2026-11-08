@@ -5,7 +5,6 @@ import net.minecraft.nbt.CompoundTag;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.avatar.local.CacheAvatarLoader;
 import org.figuramc.figura.backend2.NetworkStuff;
-import org.figuramc.figura.config.Configs;
 
 import java.util.ArrayList;
 import java.util.BitSet;
@@ -41,14 +40,9 @@ public class UserData {
         }
     }
 
-    // the host avatar is always wanted, the others while a render path asked for them recently
+    // the host avatar is always wanted, the others once a render path asked for them
     private boolean isWanted() {
-        if (FiguraMod.isLocal(id))
-            return true;
-        if (lastWanted < 0)
-            return false;
-        int limit = Configs.UNLOAD_UNUSED_AVATARS.value * 20;
-        return limit <= 0 || FiguraMod.ticks - lastWanted < limit;
+        return FiguraMod.isLocal(id) || lastWanted >= 0;
     }
 
     // starts loading the listed avatars, from the disk cache when possible
