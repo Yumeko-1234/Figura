@@ -108,14 +108,21 @@ public class ColorUtils {
         if (color != null)
             return color.vec;
 
-        try {
-            ChatFormatting formatting = ChatFormatting.valueOf(hex.toUpperCase(Locale.US));
-            Integer i = formatting.getColor();
+        // looked up in a map: valueOf threw (and filled a stack trace) for every hex color, and badges ask every frame for every nameplate
+        if (hex != null) {
+            ChatFormatting formatting = FORMATTING_BY_NAME.get(hex.toUpperCase(Locale.US));
+            Integer i = formatting == null ? null : formatting.getColor();
             if (i != null)
                 return intToRGB(i);
-        } catch (Exception ignored) {}
+        }
 
         return hexStringToRGB(hex, fallback);
+    }
+
+    private static final java.util.Map<String, ChatFormatting> FORMATTING_BY_NAME = new java.util.HashMap<>();
+    static {
+        for (ChatFormatting formatting : ChatFormatting.values())
+            FORMATTING_BY_NAME.put(formatting.name(), formatting);
     }
 
     /**
