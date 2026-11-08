@@ -104,7 +104,7 @@ public class LuaTypeManager {
                         }
                     }
                 } else { // regular methods
-                    indexTable.set(LuaStringInterner.intern(name), getWrapper(method));
+                    indexTable.set(LuaStringInterner.intern(name), LuaFastPaths.wrap(currentClass, name, getWrapper(method)));
                 }
             }
             currentClass = currentClass.getSuperclass();
