@@ -105,6 +105,7 @@ public class FiguraMod {
         popPushProfiler("emojiAnim");
         Emojis.tickAnimations();
         popProfiler();
+        org.figuramc.figura.benchmark.FiguraBenchmark.tick();
         ticks++;
     }
 

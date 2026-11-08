@@ -419,15 +419,19 @@ public class Avatar {
             return null;
 
         // run event, timing the render scripts
-        boolean timed = limit == render || limit == worldRender;
+        boolean renderTimed = limit == render || limit == worldRender;
+        boolean timed = renderTimed || org.figuramc.figura.benchmark.FiguraBenchmark.measuring;
         long start = timed ? System.nanoTime() : 0L;
         Varargs ret = luaRuntime.run(toRun, limit, args);
         if (timed) {
             long elapsed = System.nanoTime() - start;
-            renderScriptNanos += elapsed;
-            // time limited avatars share this frame's render script budget
-            if (renderScriptInterval > 0)
-                AvatarCulling.renderScriptPool -= elapsed;
+            org.figuramc.figura.benchmark.FiguraBenchmark.onLua(elapsed, renderTimed, toRun);
+            if (renderTimed) {
+                renderScriptNanos += elapsed;
+                // time limited avatars share this frame's render script budget
+                if (renderScriptInterval > 0)
+                    AvatarCulling.renderScriptPool -= elapsed;
+            }
         }
 
         // stuff that this run produced
@@ -501,6 +505,7 @@ public class Avatar {
     public static void beginLevelFrame() {
         levelFrame++;
         levelFrameNanos = System.nanoTime();
+        org.figuramc.figura.benchmark.FiguraBenchmark.onFrame(levelFrameNanos);
     }
 
     public static long getLevelFrame() {
@@ -581,6 +586,7 @@ public class Avatar {
 
     public void renderEvent(float delta, FiguraMat4 poseMatrix) {
         updateShadowScriptSharing();
+        org.figuramc.figura.benchmark.FiguraBenchmark.onRenderEvent(this, !isRenderEventSkipped());
         if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped()) {
             long start = System.nanoTime();
             runListened("RENDER", render, delta, scriptContext(), poseMatrix);

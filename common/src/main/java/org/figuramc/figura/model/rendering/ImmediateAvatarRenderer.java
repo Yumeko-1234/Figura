@@ -129,12 +129,22 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
     @Override
     public int render() {
-        return commonRender(1.5d);
+        if (!org.figuramc.figura.benchmark.FiguraBenchmark.measuring)
+            return commonRender(1.5d);
+        long start = System.nanoTime();
+        int used = commonRender(1.5d);
+        org.figuramc.figura.benchmark.FiguraBenchmark.onAvatarDraw(System.nanoTime() - start);
+        return used;
     }
 
     @Override
     public int renderSpecialParts() {
-        return commonRender(0);
+        if (!org.figuramc.figura.benchmark.FiguraBenchmark.measuring)
+            return commonRender(0);
+        long start = System.nanoTime();
+        int used = commonRender(0);
+        org.figuramc.figura.benchmark.FiguraBenchmark.onAvatarDraw(System.nanoTime() - start);
+        return used;
     }
 
     @Override
@@ -178,7 +188,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // the render scripts of this avatar are skipped this frame, only for the player in the world and its world pass
         // or already ran in this frame's shadow pass, whose results this pass draws
         // smoothing only where the scripts are limited: the player in the world and its world pass (gui and first person run every frame)
-        smoothInterval = avatar.isHost || !(avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD
+        smoothInterval = (avatar.isHost && !org.figuramc.figura.benchmark.FiguraBenchmark.HOST_AS_OTHER) || !(avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD
                 || avatar.renderMode == EntityRenderMode.OTHER) ? 0 : avatar.renderScriptInterval;
 
         // the part render functions already ran in this frame's shadow pass

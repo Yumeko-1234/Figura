@@ -189,7 +189,7 @@ public class AvatarCulling {
                 measureRenderScripts(avatar);
             avatar.renderScriptsSkipped = false;
             avatar.partScriptsRanThisFrame = false;
-            if (!avatar.isHost && !avatar.owner.equals(cameraId) && !FOCUSED.contains(avatar.owner) && !FULL_DETAIL.contains(avatar.owner) && !avatar.isRenderSkipped()) {
+            if ((org.figuramc.figura.benchmark.FiguraBenchmark.HOST_AS_OTHER || (!avatar.isHost && !avatar.owner.equals(cameraId))) && !FOCUSED.contains(avatar.owner) && !FULL_DETAIL.contains(avatar.owner) && !avatar.isRenderSkipped()) {
                 THROTTLED.add(avatar);
             } else {
                 avatar.renderScriptInterval = 0;

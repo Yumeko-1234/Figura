@@ -47,3 +47,10 @@ forge*changelog.txt
 
 # Used for testing against other mods
 libs/*.architectury-transformer/
+
+# benchmark: third-party mods, avatars, shader packs and the run directory are local only
+benchmark/mods/
+benchmark/avatars/
+benchmark/run/
+benchmark/results/
+benchmark/libs/

@@ -49,6 +49,35 @@ dependencies {
     }
     common(project(path: ":common", configuration: "namedElements")) { transitive false }
     shadowCommon(project(path: ":common", configuration: "transformProductionForge")) { transitive = false }
+
+    // frame rate benchmark (gradlew :forge:runClient -Pbenchmark): the same Epic Fight / Oculus setup as the modpack,
+    // jars copied into benchmark/mods (not in git), remapped by Loom for the dev runtime
+    if (project.hasProperty("benchmark")) {
+        modRuntimeOnly "blank:epic-fight:20.14.17-mc1.20.1-forge"
+        modRuntimeOnly "blank:figura_extra_fight:0.0.41-forge+1.20.1"
+        modRuntimeOnly "blank:oculus-mc1.20.1:1.8.0"
+        modRuntimeOnly "blank:embeddium:0.3.31+mc1.20.1"
+        // Oculus' bundled shader preprocessor, nested jars of a mod are not unpacked in the dev runtime (benchmark/libs)
+        forgeRuntimeLibrary "blank:jcpp:1.4.14"
+    }
+}
+
+if (project.hasProperty("benchmark")) {
+    repositories {
+        flatDir { dirs "$rootProject.projectDir/benchmark/mods", "$rootProject.projectDir/benchmark/libs" }
+    }
+    loom {
+        runs {
+            client {
+                runDir "../benchmark/run"
+                programArgs "--username", "FiguraBench", "--width", "1920", "--height", "1080"
+                // -PbenchmarkArgs="-Dfigura.benchmark.label=x -D..." (see FiguraBenchmark)
+                if (project.hasProperty("benchmarkArgs"))
+                    project.benchmarkArgs.toString().trim().split("\\s+").each { vmArg it }
+                vmArg "-Xmx6G"
+            }
+        }
+    }
 }
 
 processResources {
