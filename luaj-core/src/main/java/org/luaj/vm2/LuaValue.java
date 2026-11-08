@@ -3888,6 +3888,9 @@ abstract public class LuaValue extends Varargs {
 		LuaValue mt = getmetatable();
 		if (mt == null)
 			return NIL;
+		// [bh] __index of a table metatable is remembered by the table
+		if (tag == INDEX && mt instanceof LuaTable)
+			return ((LuaTable) mt).indexMetatag();
 		return mt.rawget(tag);
 	}
 

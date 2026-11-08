@@ -448,23 +448,19 @@ public final class LuaJit implements Opcodes {
                 case Lua.OP_GETTABUP -> {
                     at(pc);
                     upvalue(b);
-                    rk(c);
-                    get();
+                    getKey(c);
                     store(a);
                 }
                 case Lua.OP_GETTABLE -> {
                     at(pc);
                     reg(b);
-                    rk(c);
-                    get();
+                    getKey(c);
                     store(a);
                 }
                 case Lua.OP_SETTABUP -> {
                     at(pc);
                     upvalue(a);
-                    rk(b);
-                    rk(c);
-                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "set", "(" + D_LV + D_LV + ")V", false);
+                    setKey(b, c);
                 }
                 case Lua.OP_SETUPVAL -> {
                     upvalueRef(b);
@@ -474,9 +470,7 @@ public final class LuaJit implements Opcodes {
                 case Lua.OP_SETTABLE -> {
                     at(pc);
                     reg(a);
-                    rk(b);
-                    rk(c);
-                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "set", "(" + D_LV + D_LV + ")V", false);
+                    setKey(b, c);
                 }
                 case Lua.OP_NEWTABLE -> {
                     mv.visitTypeInsn(NEW, LT);
@@ -492,8 +486,7 @@ public final class LuaJit implements Opcodes {
                     reg(b);
                     mv.visitInsn(DUP);
                     store(a + 1);
-                    rk(c);
-                    get();
+                    getKey(c);
                     store(a);
                 }
                 case Lua.OP_ADD, Lua.OP_SUB, Lua.OP_MUL, Lua.OP_DIV, Lua.OP_MOD, Lua.OP_POW -> {
@@ -954,6 +947,36 @@ public final class LuaJit implements Opcodes {
         private void upvalue(int index) {
             upvalueRef(index);
             mv.visitMethodInsn(INVOKEVIRTUAL, UV, "getValue", "()" + D_LV, false);
+        }
+
+        private boolean stringConstant(int x) {
+            return x > 0xff && p.k[x & 0xff] instanceof org.luaj.vm2.LuaString;
+        }
+
+        // the table is on the operand stack: table[RK(x)], a constant string key without the generic lookup
+        private void getKey(int x) {
+            if (stringConstant(x)) {
+                konst(x & 0xff);
+                mv.visitTypeInsn(CHECKCAST, "org/luaj/vm2/LuaString");
+                mv.visitMethodInsn(INVOKESTATIC, CC, "getStr", "(" + D_LV + "Lorg/luaj/vm2/LuaString;)" + D_LV, false);
+            } else {
+                rk(x);
+                get();
+            }
+        }
+
+        // the table is on the operand stack: table[RK(key)] = RK(value)
+        private void setKey(int key, int value) {
+            if (stringConstant(key)) {
+                konst(key & 0xff);
+                mv.visitTypeInsn(CHECKCAST, "org/luaj/vm2/LuaString");
+                rk(value);
+                mv.visitMethodInsn(INVOKESTATIC, LT, "setStr", "(" + D_LV + "Lorg/luaj/vm2/LuaString;" + D_LV + ")V", false);
+            } else {
+                rk(key);
+                rk(value);
+                mv.visitMethodInsn(INVOKEVIRTUAL, LV, "set", "(" + D_LV + D_LV + ")V", false);
+            }
         }
 
         private void get() {

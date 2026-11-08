@@ -92,6 +92,9 @@ public class LuaTable extends LuaValue implements Metatable {
 	/** metatable for this table, or null */
 	protected Metatable m_metatable;
 
+	/** [bh] this table's "__index" while it is used as a metatable, null when not looked up since the hash part last changed */
+	private LuaValue indexTag;
+
 	/** Construct empty table */
 	public LuaTable() {
 		array = NOVALS;
@@ -193,6 +196,7 @@ public class LuaTable extends LuaValue implements Metatable {
 		// Size of both parts must be a power of two.
 		array = narray > 0? new LuaValue[1<<log2(narray)]: NOVALS;
 		hash = nhash > 0? new Slot[1<<log2(nhash)]: NOBUCKETS;
+		indexTag = null;
 		hashEntries = 0;
 	}
 
@@ -268,6 +272,66 @@ public class LuaTable extends LuaValue implements Metatable {
 			}
 		}
 		return hashget(key);
+	}
+
+	/** [bh] get with a string key (field names in code): the hash lookup of rawget without its generic dispatch */
+	public final LuaValue getStr(LuaString key) {
+		LuaValue v = rawgetStr(key);
+		return v.isnil() && m_metatable != null? gettable(this, key): v;
+	}
+
+	final LuaValue rawgetStr(LuaString key) {
+		if (hashEntries > 0) {
+			Slot[] h = hash;
+			for (Slot slot = h[key.hashCode() & (h.length-1)]; slot != null; slot = slot.rest()) {
+				Object e = slot instanceof LinkSlot? ((LinkSlot) slot).entry: slot;
+				if (e instanceof NormalEntry) {
+					NormalEntry n = (NormalEntry) e;
+					LuaValue k = n.key;
+					if (k == key || k instanceof LuaString && ((LuaString) k).raweq(key))
+						return n.value;
+				} else {
+					StrongSlot found = slot.find(key);
+					if (found != null)
+						return found.value();
+				}
+			}
+		}
+		return NIL;
+	}
+
+	/**
+	 * [bh] set with a string key: a plain table (not a subclass) without metatable whose field exists gets the value in place,
+	 * everything else goes through set
+	 */
+	public static void setStr(LuaValue t, LuaString key, LuaValue value) {
+		if (t.getClass() == LuaTable.class && !value.isnil()) {
+			LuaTable table = (LuaTable) t;
+			if (table.m_metatable == null && table.hashEntries > 0) {
+				Slot[] h = table.hash;
+				for (Slot slot = h[key.hashCode() & (h.length-1)]; slot != null; slot = slot.rest()) {
+					Object e = slot instanceof LinkSlot? ((LinkSlot) slot).entry: slot;
+					if (!(e instanceof NormalEntry))
+						break;
+					NormalEntry n = (NormalEntry) e;
+					LuaValue k = n.key;
+					if (k == key || k instanceof LuaString && ((LuaString) k).raweq(key)) {
+						n.value = value;
+						table.indexTag = null;
+						return;
+					}
+				}
+			}
+		}
+		t.set(key, value);
+	}
+
+	/** [bh] rawget(INDEX), remembered until the hash part changes: userdata and tables with a metatable look it up on every index */
+	final LuaValue indexMetatag() {
+		LuaValue v = indexTag;
+		if (v == null)
+			indexTag = v = hashget(INDEX);
+		return v;
 	}
 
 	protected LuaValue hashget(LuaValue key) {
@@ -495,6 +559,7 @@ public class LuaTable extends LuaValue implements Metatable {
 	 * @param value value to set
 	 */
 	public void hashset(LuaValue key, LuaValue value) {
+		indexTag = null;
 		if (value.isnil())
 			hashRemove(key);
 		else {
@@ -566,6 +631,7 @@ public class LuaTable extends LuaValue implements Metatable {
 	}
 
 	private void hashRemove(LuaValue key) {
+		indexTag = null;
 		if (hash.length > 0) {
 			int index = hashSlot(key);
 			for (Slot slot = hash[index]; slot != null; slot = slot.rest()) {

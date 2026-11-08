@@ -136,6 +136,11 @@ public abstract class CompiledFunction {
 
 	// -- instructions, each the same as its case in LuaClosure.execute -- //
 
+	/** GETTABLE / GETTABUP / SELF with a constant string key */
+	protected static LuaValue getStr(LuaValue t, LuaString key) {
+		return t instanceof LuaTable? ((LuaTable) t).getStr(key): t.get(key);
+	}
+
 	/** OP_CONCAT: R(b) .. ... .. R(c) */
 	protected static LuaValue concat(LuaValue[] stack, int b, int c) {
 		if (c > b+1) {
