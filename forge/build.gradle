@@ -61,6 +61,9 @@ dependencies {
         modRuntimeOnly "blank:spark:1.10.53-forge"
         // Oculus' bundled shader preprocessor, nested jars of a mod are not unpacked in the dev runtime (benchmark/libs)
         forgeRuntimeLibrary "blank:jcpp:1.4.14"
+        // the user's perf mod (-Pbhopt=<version>, benchmark BHOPT=<version>), copied into benchmark/mods
+        if (project.hasProperty("bhopt"))
+            modRuntimeOnly "blank:bhoptimization:${project.bhopt}"
     }
 }
 

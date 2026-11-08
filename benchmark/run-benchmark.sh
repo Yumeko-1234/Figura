@@ -26,7 +26,8 @@ for pass in "$@"; do
     [ -n "${SPARK:-}" ] && args="$args -Dfigura.benchmark.spark=true"
     [ -n "${JIT:-}" ] && args="$args -Dfigura.luaJit=$([ "$JIT" = 0 ] && echo false || echo true)"
     echo "=== $label ($args)"
-    ./gradlew :forge:runClient -Pbenchmark "-PbenchmarkArgs=$args" --console=plain > "benchmark/results/$label-gradle.log" 2>&1
+    extra=""; [ -n "${BHOPT:-}" ] && extra="-Pbhopt=$BHOPT"
+    ./gradlew :forge:runClient -Pbenchmark $extra "-PbenchmarkArgs=$args" --console=plain > "benchmark/results/$label-gradle.log" 2>&1
     echo "=== $label exit $?"
     grep -a "\[benchmark\] $label |" "benchmark/results/$label-gradle.log" || echo "=== $label produced no result, see benchmark/results/$label-gradle.log"
 done
