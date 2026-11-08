@@ -61,7 +61,8 @@ public class AvatarCulling {
     private static final int WORLD_BOUNDS_TICKS = 20;
 
     private static final Set<UUID> FOCUSED = new HashSet<>();
-    private static final Set<UUID> FULL_DETAIL = new HashSet<>();
+    // kept across restarts in figura/full_detail_players.txt, one uuid per line
+    private static final Set<UUID> FULL_DETAIL = loadFullDetail();
 
     private static final List<Avatar> AVATARS = new ArrayList<>();
     private static final List<double[]> OCCLUDERS = new ArrayList<>();
@@ -114,10 +115,52 @@ public class AvatarCulling {
      * @return if the player is now drawn at full detail
      */
     public static boolean toggleFullDetail(UUID id) {
-        if (FULL_DETAIL.remove(id))
-            return false;
-        FULL_DETAIL.add(id);
-        return true;
+        boolean on = !FULL_DETAIL.remove(id);
+        if (on)
+            FULL_DETAIL.add(id);
+        saveFullDetail();
+        return on;
+    }
+
+    // the benchmark sets its own players, never the saved ones
+    private static java.nio.file.Path fullDetailFile() {
+        return org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED ? null : FiguraMod.getFiguraDirectory().resolve("full_detail_players.txt");
+    }
+
+    private static Set<UUID> loadFullDetail() {
+        Set<UUID> set = new HashSet<>();
+        try {
+            java.nio.file.Path file = fullDetailFile();
+            if (file == null || !java.nio.file.Files.exists(file))
+                return set;
+            for (String line : java.nio.file.Files.readAllLines(file)) {
+                line = line.trim();
+                if (line.isEmpty())
+                    continue;
+                try {
+                    set.add(UUID.fromString(line));
+                } catch (IllegalArgumentException ignored) {
+                    // not a uuid
+                }
+            }
+        } catch (Exception e) {
+            FiguraMod.LOGGER.warn("Could not read the full detail players", e);
+        }
+        return set;
+    }
+
+    private static void saveFullDetail() {
+        try {
+            java.nio.file.Path file = fullDetailFile();
+            if (file == null)
+                return;
+            List<String> lines = new ArrayList<>();
+            for (UUID id : FULL_DETAIL)
+                lines.add(id.toString());
+            java.nio.file.Files.write(file, lines);
+        } catch (Exception e) {
+            FiguraMod.LOGGER.warn("Could not save the full detail players", e);
+        }
     }
 
     // -- per frame update -- //

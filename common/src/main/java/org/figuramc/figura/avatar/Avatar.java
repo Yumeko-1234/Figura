@@ -586,7 +586,7 @@ public class Avatar {
 
     public void renderEvent(float delta, FiguraMat4 poseMatrix) {
         updateShadowScriptSharing();
-        org.figuramc.figura.benchmark.FiguraBenchmark.onRenderEvent(this, !isRenderEventSkipped());
+        org.figuramc.figura.benchmark.FiguraBenchmark.onRenderEvent(this, !isRenderEventSkipped(), delta);
         if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped()) {
             long start = System.nanoTime();
             runListened("RENDER", render, delta, scriptContext(), poseMatrix);

@@ -305,7 +305,25 @@ public final class FiguraBenchmark {
     // what the render script limit decided, counted on every render event of the benchmark avatar
     private static final java.util.Map<String, Integer> RENDER_EVENTS = new java.util.TreeMap<>();
 
-    public static void onRenderEvent(org.figuramc.figura.avatar.Avatar avatar, boolean ran) {
+    private static int tracedEvents;
+
+    // the traced crowd player's vanilla head rotation as the render event sees it, against the one of this frame
+    private static void traceRenderEvent(org.figuramc.figura.avatar.Avatar avatar, float delta) {
+        if (TRACE_HEAD < 0 || !measuring || tracedEvents >= 120 || TRACE_HEAD >= CROWD_PLAYERS.size())
+            return;
+        RemotePlayer p = CROWD_PLAYERS.get(TRACE_HEAD);
+        if (!avatar.owner.equals(p.getUUID()) || avatar.luaRuntime == null)
+            return;
+        tracedEvents++;
+        float pt = Minecraft.getInstance().getFrameTime();
+        org.figuramc.figura.math.vector.FiguraVec3 seen = avatar.luaRuntime.vanilla_model.HEAD.getOriginRot();
+        float headYaw = net.minecraft.util.Mth.rotLerp(pt, p.yHeadRotO, p.yHeadRot), bodyYaw = net.minecraft.util.Mth.rotLerp(pt, p.yBodyRotO, p.yBodyRot);
+        log(String.format(Locale.ROOT, "event %d delta=%.3f pt=%.3f script sees head yaw %.2f pitch %.2f, this frame %.2f %.2f",
+                tracedEvents, delta, pt, seen.y, seen.x, -net.minecraft.util.Mth.wrapDegrees(headYaw - bodyYaw), -p.getViewXRot(pt)));
+    }
+
+    public static void onRenderEvent(org.figuramc.figura.avatar.Avatar avatar, boolean ran, float delta) {
+        traceRenderEvent(avatar, delta);
         if (!measuring)
             return;
         String key = "mode=" + avatar.renderMode + " limited=" + (avatar.renderScriptInterval > 0) + " ran=" + ran;
@@ -343,6 +361,12 @@ public final class FiguraBenchmark {
         String rate = System.getProperty("figura.benchmark.rate");
         if (rate != null)
             Configs.AVATAR_RENDER_SCRIPT_RATE.value = Integer.parseInt(rate);
+        String tickBudget = System.getProperty("figura.benchmark.tickBudget");
+        if (tickBudget != null)
+            Configs.AVATAR_TICK_SCRIPT_BUDGET.value = Float.parseFloat(tickBudget);
+        String spread = System.getProperty("figura.benchmark.spreadTicks");
+        if (spread != null)
+            Configs.SPREAD_TICK_SCRIPTS.value = Boolean.parseBoolean(spread);
         String budget = System.getProperty("figura.benchmark.budget");
         if (budget != null)
             Configs.AVATAR_RENDER_SCRIPT_BUDGET.value = Float.parseFloat(budget);
@@ -403,6 +427,16 @@ public final class FiguraBenchmark {
                 FiguraMod.LOGGER.error("[benchmark] could not read the avatar " + files[i], e);
             }
         }
+        // -Dfigura.benchmark.fullDetail=3,8: those crowd players set to full detail (like the popup menu's Toggle Full Detail)
+        for (String index : System.getProperty("figura.benchmark.fullDetail", "").split(",")) {
+            if (index.isBlank())
+                continue;
+            int i = Integer.parseInt(index.trim());
+            if (i >= 0 && i < CROWD_PLAYERS.size()) {
+                org.figuramc.figura.avatar.AvatarCulling.toggleFullDetail(CROWD_PLAYERS.get(i).getUUID());
+                log("crowd " + i + " set to full detail");
+            }
+        }
         crowdSize = n;
     }
 
@@ -413,6 +447,9 @@ public final class FiguraBenchmark {
     private static final java.util.List<RemotePlayer> CROWD_PLAYERS = new java.util.ArrayList<>();
     private static final java.util.List<HeadStats> HEAD_STATS = new java.util.ArrayList<>();
     private static int crowdTicks;
+    // -Dfigura.benchmark.traceHead=<index>: log the head of that crowd player frame by frame
+    private static final int TRACE_HEAD = Integer.getInteger("figura.benchmark.traceHead", -1);
+    private static int traced;
 
     private static boolean usesSmoothHead(CompoundTag nbt) {
         CompoundTag scripts = nbt.getCompound("scripts");
@@ -481,6 +518,11 @@ public final class FiguraBenchmark {
             x /= len; y /= len; z /= len;
             double yaw = Math.toRadians(p.getViewYRot(pt)), pitch = Math.toRadians(p.getViewXRot(pt));
             double tx = -Math.sin(yaw) * Math.cos(pitch), ty = -Math.sin(pitch), tz = Math.cos(yaw) * Math.cos(pitch);
+            if (i == TRACE_HEAD && measuring && traced < 240) {
+                traced++;
+                log(String.format(Locale.ROOT, "trace %d pt=%.3f target yaw=%.2f pitch=%.2f drawn yaw=%.2f pitch=%.2f", traced, pt,
+                        Math.toDegrees(Math.atan2(-tx, tz)), Math.toDegrees(Math.asin(-ty)), Math.toDegrees(Math.atan2(-x, z)), Math.toDegrees(Math.asin(-y))));
+            }
             if (s.hasLast && measuring) {
                 double drawn = angle(x, y, z, s.lastX, s.lastY, s.lastZ), target = angle(tx, ty, tz, s.lastTX, s.lastTY, s.lastTZ);
                 s.frames++;

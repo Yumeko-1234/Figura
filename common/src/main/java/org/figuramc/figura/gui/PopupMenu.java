@@ -78,7 +78,8 @@ public class PopupMenu {
                 FiguraToast.sendToast(FiguraText.of(on ? "toast.focus_on" : "toast.focus_off"));
             }),
             Pair.of(FiguraText.of("popup_menu.full_detail"), id -> {
-                // only the detail reductions are turned off, culling and script throttling still apply
+                // no detail reductions and no script throttling (render and tick script budgets) for this player, culling still applies;
+                // kept across restarts
                 Avatar avatar = AvatarManager.getAvatarForPlayer(id);
                 boolean wasReduced = avatar != null && FiguraModelPartReader.getLodCell(avatar) > 0f;
                 boolean on = AvatarCulling.toggleFullDetail(id);
