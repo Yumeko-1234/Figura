@@ -53,6 +53,8 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     private boolean vanillaApplied;
     // smoothing of what its scripts set while they are time limited, null when not smoothed (ScriptTransformInterpolator)
     public ScriptTransformInterpolator.State interpolation;
+    // the avatar's render script cycle this part last ran its render functions in (time limited avatars, see AvatarCulling)
+    public long scriptCycle = Long.MIN_VALUE;
 
     // if the vanilla parent offsets were added to the customization this frame (and not reset yet)
     public boolean hasVanillaOffsets() {

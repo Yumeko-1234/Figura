@@ -63,6 +63,25 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     // nanoseconds between two runs of this avatar's render scripts when they are time limited, its parts are then smoothed
     // in between (ScriptTransformInterpolator); 0 when they run every frame
     private long smoothInterval;
+    // if the part render functions run in cycles this pass (time limited avatars in the world)
+    private boolean cycledPartScripts;
+
+    // if this part runs its render functions now: always for avatars that are not time limited, otherwise once per cycle of the avatar,
+    // while this frame's render script budget lasts (the first part of an avatar each frame always may, so every cycle finishes);
+    // a part runs its pre, mid and post render functions together
+    private boolean partScriptsDue(FiguraModelPart part) {
+        if (skipPartScripts)
+            return false;
+        if (!cycledPartScripts)
+            return true;
+        if (part.scriptCycle == avatar.renderCycle)
+            return false;
+        if (AvatarCulling.renderScriptPool <= 0 && avatar.partScriptsRanThisFrame)
+            return false;
+        part.scriptCycle = avatar.renderCycle;
+        avatar.partScriptsRanThisFrame = true;
+        return true;
+    }
 
     // -- frame replay -- //
     // in a crowd, only the closest players are drawn from their model every frame (AvatarCulling.throttleRedraws): the others alternate
@@ -162,9 +181,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         smoothInterval = avatar.isHost || !(avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD
                 || avatar.renderMode == EntityRenderMode.OTHER) ? 0 : avatar.renderScriptInterval;
 
-        skipPartScripts = (avatar.renderScriptsSkipped
-                && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD))
-                || avatar.reusesShadowScripts();
+        // the part render functions already ran in this frame's shadow pass
+        skipPartScripts = avatar.reusesShadowScripts();
+        // time limited avatars: each part runs its render functions once per cycle, spread over frames (partScriptsDue)
+        cycledPartScripts = avatar.renderScriptInterval > 0
+                && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD);
 
         // simplified body: the player in the world and the world pass (which walks every part looking for world parts)
         // never the gui, first person, the host (unless enabled) or the focused players
@@ -511,8 +532,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return true;
         }
 
+        // pre, mid and post render functions run together, or not at all this pass
+        boolean runScripts = (part.preRender != null || part.midRender != null || part.postRender != null) && partScriptsDue(part);
+
         // pre render function
-        if (part.preRender != null && !skipPartScripts) {
+        if (part.preRender != null && runScripts) {
             popPush("preRenderFunction");
             avatar.run(part.preRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }
@@ -590,7 +614,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         }
 
         // mid render function
-        if (part.midRender != null && !skipPartScripts) {
+        if (part.midRender != null && runScripts) {
             popPush("midRenderFunction");
             avatar.run(part.midRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }
@@ -678,7 +702,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         part.resetVanillaTransforms();
 
         // post render function
-        if (part.postRender != null && !skipPartScripts) {
+        if (part.postRender != null && runScripts) {
             popPush("postRenderFunction");
             avatar.run(part.postRender, avatar.render, tickDelta, avatar.scriptContext(), part);
         }

@@ -155,6 +155,13 @@ public class Avatar {
     // and the level frame time from which they may run again. Parts moved by the scripts are smoothed in between (ScriptTransformInterpolator)
     public long renderScriptInterval;
     public long nextRenderScriptRun = Long.MIN_VALUE;
+    // the render script cycle (one run of its scripts spread over frames): counted up when a cycle starts, each part runs its render
+    // functions once per cycle; if a part ran them this frame (one always may, even past the frame's budget)
+    public long renderCycle;
+    public boolean partScriptsRanThisFrame;
+    // time of the render events alone (render and post render), they run on the first frame of a cycle
+    public long renderEventNanos;
+    public double renderEventCost;
     // set every frame by AvatarCulling, for the players beyond the closest Full Rate Players
     // redrawThrottled: the model pass keeps what it draws, redrawSkipped: it draws the kept frame again instead of walking the model
     public boolean redrawThrottled, redrawSkipped;
@@ -415,8 +422,13 @@ public class Avatar {
         boolean timed = limit == render || limit == worldRender;
         long start = timed ? System.nanoTime() : 0L;
         Varargs ret = luaRuntime.run(toRun, limit, args);
-        if (timed)
-            renderScriptNanos += System.nanoTime() - start;
+        if (timed) {
+            long elapsed = System.nanoTime() - start;
+            renderScriptNanos += elapsed;
+            // time limited avatars share this frame's render script budget
+            if (renderScriptInterval > 0)
+                AvatarCulling.renderScriptPool -= elapsed;
+        }
 
         // stuff that this run produced
         flushQueuedEvents();
@@ -569,13 +581,19 @@ public class Avatar {
 
     public void renderEvent(float delta, FiguraMat4 poseMatrix) {
         updateShadowScriptSharing();
-        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped())
+        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped()) {
+            long start = System.nanoTime();
             runListened("RENDER", render, delta, scriptContext(), poseMatrix);
+            renderEventNanos += System.nanoTime() - start;
+        }
     }
 
     public void postRenderEvent(float delta, FiguraMat4 poseMatrix) {
-        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped())
+        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped()) {
+            long start = System.nanoTime();
             runListened("POST_RENDER", render.post(), delta, scriptContext(), poseMatrix);
+            renderEventNanos += System.nanoTime() - start;
+        }
         finishShadowScriptSharing();
         renderMode = EntityRenderMode.OTHER;
     }
