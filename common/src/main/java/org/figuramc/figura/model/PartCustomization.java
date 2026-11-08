@@ -416,8 +416,15 @@ public class PartCustomization {
         normalMatrix.transpose();
     }
 
-    public void setMatrix(FiguraMat4 matrix) {
+    // a matrix set by a script (part:setMatrix): smoothed between runs of time limited render scripts
+    public void setScriptMatrix(FiguraMat4 matrix) {
+        setMatrix(matrix);
         customMatrix = true;
+    }
+
+    // a matrix set from Java (camera parent, Epic Fight joints from figura_extra_fight...): new every frame, never smoothed
+    public void setMatrix(FiguraMat4 matrix) {
+        customMatrix = false;
         positionMatrix.set(matrix);
         // normal matrix = inverse transpose of the 3x3 part, computed in place instead of on a deaugmented copy
         normalMatrix.set(matrix.v11, matrix.v21, matrix.v31, matrix.v12, matrix.v22, matrix.v32, matrix.v13, matrix.v23, matrix.v33);

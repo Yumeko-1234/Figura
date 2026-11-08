@@ -768,7 +768,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             value = "model_part.set_matrix"
     )
     public FiguraModelPart setMatrix(@LuaNotNil FiguraMat4 matrix) {
-        this.customization.setMatrix(matrix);
+        this.customization.setScriptMatrix(matrix);
         return this;
     }
 
