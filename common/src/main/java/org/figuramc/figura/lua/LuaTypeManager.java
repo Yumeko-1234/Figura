@@ -100,11 +100,11 @@ public class LuaTypeManager {
                                 }
                             });
                         } else {
-                            metatable.set(name, getWrapper(method));
+                            metatable.set(name, LuaFastPaths.wrap(this, currentClass, name, getWrapper(method)));
                         }
                     }
                 } else { // regular methods
-                    indexTable.set(LuaStringInterner.intern(name), LuaFastPaths.wrap(currentClass, name, getWrapper(method)));
+                    indexTable.set(LuaStringInterner.intern(name), LuaFastPaths.wrap(this, currentClass, name, getWrapper(method)));
                 }
             }
             currentClass = currentClass.getSuperclass();
