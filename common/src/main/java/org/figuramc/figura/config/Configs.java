@@ -165,7 +165,7 @@ public class Configs {
             AVATAR_TICK_SCRIPT_BUDGET = new ConfigType.PositiveFloatConfig("avatar_tick_script_budget", RENDERING, 1f);
     public static final ConfigType.BoolConfig
             GECKOLIB_ITEM_CACHE = new ConfigType.BoolConfig("geckolib_item_cache", RENDERING, true),
-            REPLAY_CROWD_AVATARS = new ConfigType.BoolConfig("replay_crowd_avatars", RENDERING, true),
+            REPLAY_CROWD_AVATARS = new ConfigType.BoolConfig("replay_crowd_avatars", RENDERING, false),
             SPREAD_TICK_SCRIPTS = new ConfigType.BoolConfig("spread_tick_scripts", RENDERING, true),
             AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
             SIMPLIFY_AVATAR_BODIES = new ConfigType.BoolConfig("simplify_avatar_bodies", RENDERING, false),
