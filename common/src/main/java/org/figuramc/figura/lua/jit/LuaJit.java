@@ -181,6 +181,10 @@ public final class LuaJit implements Opcodes {
         // instructions starting a block (counted together), and words that are data of the instruction before (not run)
         private final boolean[] leader, data;
         private final boolean openups;
+        // registers captured as upvalues by inner functions stay in the stack array (their upvalues point at it),
+        // all others live in JVM locals and are only copied to the array for the instructions reading ranges of it
+        private final boolean[] captured;
+        private final int maxReg;
 
         Body(Prototype p, MethodVisitor mv) {
             this.p = p;
@@ -193,6 +197,12 @@ public final class LuaJit implements Opcodes {
             this.leader = new boolean[n + 2];
             this.data = new boolean[n + 2];
             this.openups = p.p.length > 0;
+            this.maxReg = p.maxstacksize - 1;
+            this.captured = new boolean[Math.max(p.maxstacksize, 1)];
+            for (Prototype child : p.p)
+                for (var uv : child.upvalues)
+                    if (uv.instack && uv.idx >= 0 && uv.idx < captured.length)
+                        captured[uv.idx] = true;
             findBlocks();
         }
 
@@ -246,7 +256,6 @@ public final class LuaJit implements Opcodes {
         }
 
         void emit() {
-
             // k = p.k, openups, v = NONE, top = 0, pc = 0, hook state and call frame
             mv.visitVarInsn(ALOAD, CL);
             mv.visitFieldInsn(GETFIELD, LC, "p", "L" + PR + ";");
@@ -268,6 +277,19 @@ public final class LuaJit implements Opcodes {
             mv.visitVarInsn(ISTORE, PC);
             mv.visitInsn(ACONST_NULL);
             mv.visitVarInsn(ASTORE, TMP);
+            // registers: the arguments from the stack array, the rest nil like the array
+            for (int r = 0; r <= maxReg; r++) {
+                if (captured[r])
+                    continue;
+                if (r < p.numparams) {
+                    mv.visitVarInsn(ALOAD, STACK);
+                    push(r);
+                    mv.visitInsn(AALOAD);
+                } else {
+                    mv.visitFieldInsn(GETSTATIC, LV, "NIL", D_LV);
+                }
+                mv.visitVarInsn(ASTORE, slot(r));
+            }
             mv.visitVarInsn(ALOAD, CL);
             mv.visitVarInsn(ALOAD, STACK);
             mv.visitVarInsn(ALOAD, VARARGS);
@@ -323,14 +345,12 @@ public final class LuaJit implements Opcodes {
             int a = Lua.GETARG_A(i), b = Lua.GETARG_B(i), c = Lua.GETARG_C(i), bx = Lua.GETARG_Bx(i), sbx = Lua.GETARG_sBx(i);
             switch (op) {
                 case Lua.OP_MOVE -> {
-                    regStore(a);
                     reg(b);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_LOADK -> {
-                    regStore(a);
                     konst(bx);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_LOADKX -> {
                     int next = pc + 1 < n ? code[pc + 1] : 0;
@@ -340,45 +360,39 @@ public final class LuaJit implements Opcodes {
                         mv.visitMethodInsn(INVOKESTATIC, CC, "badExtraArg", "(I)Lorg/luaj/vm2/LuaError;", false);
                         mv.visitInsn(ATHROW);
                     } else {
-                        regStore(a);
                         konst(next >>> 6);
-                        mv.visitInsn(AASTORE);
+                        store(a);
                     }
                 }
                 case Lua.OP_LOADBOOL -> {
-                    regStore(a);
                     mv.visitFieldInsn(GETSTATIC, LV, b != 0 ? "TRUE" : "FALSE", "Lorg/luaj/vm2/LuaBoolean;");
-                    mv.visitInsn(AASTORE);
+                    store(a);
                     if (c != 0)
                         jump(pc + 2);
                 }
                 case Lua.OP_LOADNIL -> {
                     for (int j = 0; j <= b; j++) {
-                        regStore(a + j);
                         mv.visitFieldInsn(GETSTATIC, LV, "NIL", D_LV);
-                        mv.visitInsn(AASTORE);
+                        store(a + j);
                     }
                 }
                 case Lua.OP_GETUPVAL -> {
-                    regStore(a);
                     upvalue(b);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_GETTABUP -> {
                     at(pc);
-                    regStore(a);
                     upvalue(b);
                     rk(c);
                     get();
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_GETTABLE -> {
                     at(pc);
-                    regStore(a);
                     reg(b);
                     rk(c);
                     get();
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_SETTABUP -> {
                     at(pc);
@@ -400,30 +414,25 @@ public final class LuaJit implements Opcodes {
                     mv.visitMethodInsn(INVOKEVIRTUAL, LV, "set", "(" + D_LV + D_LV + ")V", false);
                 }
                 case Lua.OP_NEWTABLE -> {
-                    regStore(a);
                     mv.visitTypeInsn(NEW, LT);
                     mv.visitInsn(DUP);
                     push(b);
                     push(c);
                     mv.visitMethodInsn(INVOKESPECIAL, LT, "<init>", "(II)V", false);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_SELF -> {
+                    // R(a+1) := R(b); R(a) := R(b)[RK(c)], RK(c) read after the first store like the interpreter
                     at(pc);
                     reg(b);
-                    mv.visitVarInsn(ASTORE, TMP);
-                    regStore(a + 1);
-                    mv.visitVarInsn(ALOAD, TMP);
-                    mv.visitInsn(AASTORE);
-                    regStore(a);
-                    mv.visitVarInsn(ALOAD, TMP);
+                    mv.visitInsn(DUP);
+                    store(a + 1);
                     rk(c);
                     get();
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_ADD, Lua.OP_SUB, Lua.OP_MUL, Lua.OP_DIV, Lua.OP_MOD, Lua.OP_POW -> {
                     at(pc);
-                    regStore(a);
                     rk(b);
                     rk(c);
                     String name = switch (op) {
@@ -435,25 +444,31 @@ public final class LuaJit implements Opcodes {
                         default -> "pow";
                     };
                     mv.visitMethodInsn(INVOKEVIRTUAL, LV, name, "(" + D_LV + ")" + D_LV, false);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_UNM, Lua.OP_NOT, Lua.OP_LEN -> {
                     at(pc);
-                    regStore(a);
                     reg(b);
                     mv.visitMethodInsn(INVOKEVIRTUAL, LV, op == Lua.OP_UNM ? "neg" : op == Lua.OP_NOT ? "not" : "len", "()" + D_LV, false);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_CONCAT -> {
                     at(pc);
-                    regStore(a);
-                    mv.visitVarInsn(ALOAD, STACK);
-                    push(b);
-                    push(c);
-                    mv.visitMethodInsn(INVOKESTATIC, CC, "concat", "(" + D_STACK + "II)" + D_LV, false);
-                    mv.visitInsn(AASTORE);
+                    if (c == b + 1) {
+                        reg(b);
+                        reg(c);
+                        mv.visitMethodInsn(INVOKEVIRTUAL, LV, "concat", "(" + D_LV + ")" + D_LV, false);
+                    } else {
+                        spill(b, c);
+                        mv.visitVarInsn(ALOAD, STACK);
+                        push(b);
+                        push(c);
+                        mv.visitMethodInsn(INVOKESTATIC, CC, "concat", "(" + D_STACK + "II)" + D_LV, false);
+                    }
+                    store(a);
                 }
                 case Lua.OP_JMP -> {
+                    // upvalues are only open for captured registers, which live in the stack array
                     if (a > 0 && openups) {
                         mv.visitVarInsn(ALOAD, OPENUPS);
                         push(a - 1);
@@ -480,15 +495,15 @@ public final class LuaJit implements Opcodes {
                     mv.visitVarInsn(ALOAD, TMP);
                     mv.visitMethodInsn(INVOKEVIRTUAL, LV, "toboolean", "()Z", false);
                     mv.visitJumpInsn(c != 0 ? IFEQ : IFNE, labels[pc + 2]);
-                    regStore(a);
                     mv.visitVarInsn(ALOAD, TMP);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_CALL -> call(pc, a, b, c);
                 case Lua.OP_TAILCALL -> tailcall(pc, a, b);
                 case Lua.OP_RETURN -> {
                     switch (b) {
                         case 0 -> {
+                            spill(a, maxReg);
                             mv.visitVarInsn(ALOAD, STACK);
                             push(a);
                             mv.visitVarInsn(ILOAD, TOP);
@@ -498,6 +513,7 @@ public final class LuaJit implements Opcodes {
                         case 1 -> mv.visitFieldInsn(GETSTATIC, LV, "NONE", D_LV);
                         case 2 -> reg(a);
                         default -> {
+                            spill(a, a + b - 2);
                             mv.visitVarInsn(ALOAD, STACK);
                             push(a);
                             push(b - 1);
@@ -507,41 +523,81 @@ public final class LuaJit implements Opcodes {
                     returnValue();
                 }
                 case Lua.OP_FORLOOP -> {
+                    // idx = R(a) + R(a+2); if (step > 0 ? idx <= limit : idx >= limit) { R(a) = R(a+3) = idx; jump back }
                     at(pc);
-                    mv.visitVarInsn(ALOAD, STACK);
-                    push(a);
-                    mv.visitMethodInsn(INVOKESTATIC, CC, "forloop", "(" + D_STACK + "I)Z", false);
-                    mv.visitJumpInsn(IFNE, labels[pc + 1 + sbx]);
+                    Label down = new Label(), test = new Label();
+                    reg(a);
+                    reg(a + 2);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "add", "(" + D_LV + ")" + D_LV, false);
+                    mv.visitVarInsn(ASTORE, TMP);
+                    reg(a + 2);
+                    mv.visitInsn(ICONST_0);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "gt_b", "(I)Z", false);
+                    mv.visitJumpInsn(IFEQ, down);
+                    mv.visitVarInsn(ALOAD, TMP);
+                    reg(a + 1);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "lteq_b", "(" + D_LV + ")Z", false);
+                    mv.visitJumpInsn(GOTO, test);
+                    mv.visitLabel(down);
+                    mv.visitVarInsn(ALOAD, TMP);
+                    reg(a + 1);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "gteq_b", "(" + D_LV + ")Z", false);
+                    mv.visitLabel(test);
+                    mv.visitJumpInsn(IFEQ, labels[pc + 1]);
+                    mv.visitVarInsn(ALOAD, TMP);
+                    store(a);
+                    mv.visitVarInsn(ALOAD, TMP);
+                    store(a + 3);
+                    jump(pc + 1 + sbx);
                 }
                 case Lua.OP_FORPREP -> {
+                    // checked in the interpreter's order: initial value, limit, step
                     at(pc);
-                    mv.visitVarInsn(ALOAD, STACK);
-                    push(a);
-                    mv.visitMethodInsn(INVOKESTATIC, CC, "forprep", "(" + D_STACK + "I)V", false);
+                    reg(a);
+                    checknumber("'for' initial value must be a number");
+                    mv.visitVarInsn(ASTORE, TMP);
+                    reg(a + 1);
+                    checknumber("'for' limit must be a number");
+                    store(a + 1);
+                    reg(a + 2);
+                    checknumber("'for' step must be a number");
+                    mv.visitInsn(DUP);
+                    store(a + 2);
+                    mv.visitVarInsn(ALOAD, TMP);
+                    mv.visitInsn(SWAP);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "sub", "(" + D_LV + ")" + D_LV, false);
+                    store(a);
                     jump(pc + 1 + sbx);
                 }
                 case Lua.OP_TFORCALL -> {
                     at(pc);
-                    mv.visitVarInsn(ALOAD, STACK);
-                    push(a);
-                    push(c);
-                    mv.visitMethodInsn(INVOKESTATIC, CC, "tforcall", "(" + D_STACK + "II)V", false);
+                    reg(a);
+                    reg(a + 1);
+                    reg(a + 2);
+                    mv.visitMethodInsn(INVOKESTATIC, LV, "varargsOf", "(" + D_LV + D_VA + ")" + D_VA, false);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, LV, "invoke", "(" + D_VA + ")" + D_VA, false);
+                    mv.visitVarInsn(ASTORE, V);
+                    for (int j = 0; j < c; j++) {
+                        mv.visitVarInsn(ALOAD, V);
+                        push(j + 1);
+                        mv.visitMethodInsn(INVOKEVIRTUAL, VA, "arg", "(I)" + D_LV, false);
+                        store(a + 3 + j);
+                    }
                     mv.visitFieldInsn(GETSTATIC, LV, "NONE", D_LV);
                     mv.visitVarInsn(ASTORE, V);
                 }
                 case Lua.OP_TFORLOOP -> {
-                    Label next = labels[pc + 1];
                     reg(a + 1);
                     mv.visitMethodInsn(INVOKEVIRTUAL, LV, "isnil", "()Z", false);
-                    mv.visitJumpInsn(IFNE, next);
-                    regStore(a);
+                    mv.visitJumpInsn(IFNE, labels[pc + 1]);
                     reg(a + 1);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                     jump(pc + 1 + sbx);
                 }
                 case Lua.OP_SETLIST -> {
                     at(pc);
                     int count = c == 0 ? (pc + 1 < n ? code[pc + 1] : 0) : c;
+                    spill(a, b == 0 ? maxReg : a + b);
                     mv.visitVarInsn(ALOAD, STACK);
                     push(a);
                     push(b);
@@ -553,14 +609,14 @@ public final class LuaJit implements Opcodes {
                         jump(pc + 2);
                 }
                 case Lua.OP_CLOSURE -> {
+                    // the registers it captures are captured ones, in the stack array
                     at(pc);
-                    regStore(a);
                     mv.visitVarInsn(ALOAD, CL);
                     push(bx);
                     mv.visitVarInsn(ALOAD, STACK);
                     mv.visitVarInsn(ALOAD, OPENUPS);
                     mv.visitMethodInsn(INVOKESTATIC, CC, "closure", "(" + D_LC + "I" + D_STACK + D_UPS + ")L" + LC + ";", false);
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 }
                 case Lua.OP_VARARG -> {
                     if (b == 0) {
@@ -572,11 +628,12 @@ public final class LuaJit implements Opcodes {
                         mv.visitVarInsn(ALOAD, VARARGS);
                         mv.visitVarInsn(ASTORE, V);
                     } else {
-                        mv.visitVarInsn(ALOAD, STACK);
-                        push(a);
-                        push(b);
-                        mv.visitVarInsn(ALOAD, VARARGS);
-                        mv.visitMethodInsn(INVOKESTATIC, CC, "vararg", "(" + D_STACK + "II" + D_VA + ")V", false);
+                        for (int j = 1; j < b; j++) {
+                            mv.visitVarInsn(ALOAD, VARARGS);
+                            push(j);
+                            mv.visitMethodInsn(INVOKEVIRTUAL, VA, "arg", "(I)" + D_LV, false);
+                            store(a + j - 1);
+                        }
                     }
                 }
                 default -> {
@@ -610,8 +667,6 @@ public final class LuaJit implements Opcodes {
                 return;
             }
             if ((c == 1 || c == 2) && b >= 1 && b <= 4) {
-                if (c == 2)
-                    regStore(a);
                 reg(a);
                 StringBuilder desc = new StringBuilder("(");
                 for (int j = 1; j < b; j++) {
@@ -620,12 +675,13 @@ public final class LuaJit implements Opcodes {
                 }
                 mv.visitMethodInsn(INVOKEVIRTUAL, LV, "call", desc.append(")").append(D_LV).toString(), false);
                 if (c == 2)
-                    mv.visitInsn(AASTORE);
+                    store(a);
                 else
                     mv.visitInsn(POP);
                 return;
             }
-            // v = R(a).invoke(args)
+            // v = R(a).invoke(args), the arguments read from the stack array
+            spill(a + 1, b == 0 ? maxReg : a + b - 1);
             reg(a);
             mv.visitVarInsn(ALOAD, STACK);
             push(a);
@@ -636,11 +692,18 @@ public final class LuaJit implements Opcodes {
             mv.visitMethodInsn(INVOKEVIRTUAL, LV, "invoke", "(" + D_VA + ")" + D_VA, false);
             mv.visitVarInsn(ASTORE, V);
             if (c > 0) {
-                mv.visitVarInsn(ALOAD, V);
-                mv.visitVarInsn(ALOAD, STACK);
-                push(a);
-                push(c - 1);
-                mv.visitMethodInsn(INVOKESTATIC, CC, "results", "(" + D_VA + D_STACK + "II)V", false);
+                if (c == 2) {
+                    mv.visitVarInsn(ALOAD, V);
+                    mv.visitMethodInsn(INVOKEVIRTUAL, VA, "arg1", "()" + D_LV, false);
+                    store(a);
+                } else {
+                    for (int j = 0; j < c - 1; j++) {
+                        mv.visitVarInsn(ALOAD, V);
+                        push(j + 1);
+                        mv.visitMethodInsn(INVOKEVIRTUAL, VA, "arg", "(I)" + D_LV, false);
+                        store(a + j);
+                    }
+                }
                 mv.visitFieldInsn(GETSTATIC, LV, "NONE", D_LV);
                 mv.visitVarInsn(ASTORE, V);
             } else {
@@ -658,6 +721,8 @@ public final class LuaJit implements Opcodes {
         // OP_TAILCALL: return new TailcallVarargs(R(a), args)
         private void tailcall(int pc, int a, int b) {
             at(pc);
+            if (b == 0 || b > 4)
+                spill(a + 1, b == 0 ? maxReg : a + b - 1);
             mv.visitTypeInsn(NEW, TV);
             mv.visitInsn(DUP);
             reg(a);
@@ -711,16 +776,53 @@ public final class LuaJit implements Opcodes {
             mv.visitJumpInsn(GOTO, labels[Math.min(Math.max(target, 0), n)]);
         }
 
-        private void reg(int r) {
-            mv.visitVarInsn(ALOAD, STACK);
-            push(r);
-            mv.visitInsn(AALOAD);
+        private int slot(int r) {
+            return ERR + 1 + r;
         }
 
-        // stack array and index of R(r), the value to store comes next, then AASTORE
-        private void regStore(int r) {
-            mv.visitVarInsn(ALOAD, STACK);
-            push(r);
+        private boolean inArray(int r) {
+            return r < 0 || r >= captured.length || captured[r];
+        }
+
+        // R(r) onto the operand stack
+        private void reg(int r) {
+            if (inArray(r)) {
+                mv.visitVarInsn(ALOAD, STACK);
+                push(r);
+                mv.visitInsn(AALOAD);
+            } else {
+                mv.visitVarInsn(ALOAD, slot(r));
+            }
+        }
+
+        // the value on the operand stack into R(r)
+        private void store(int r) {
+            if (inArray(r)) {
+                mv.visitVarInsn(ALOAD, STACK);
+                mv.visitInsn(SWAP);
+                push(r);
+                mv.visitInsn(SWAP);
+                mv.visitInsn(AASTORE);
+            } else {
+                mv.visitVarInsn(ASTORE, slot(r));
+            }
+        }
+
+        // registers from .. to (those in locals) copied to the stack array, for an instruction reading them from it
+        private void spill(int from, int to) {
+            for (int r = Math.max(from, 0); r <= Math.min(to, maxReg); r++) {
+                if (captured[r])
+                    continue;
+                mv.visitVarInsn(ALOAD, STACK);
+                push(r);
+                mv.visitVarInsn(ALOAD, slot(r));
+                mv.visitInsn(AASTORE);
+            }
+        }
+
+        private void checknumber(String message) {
+            mv.visitLdcInsn(message);
+            mv.visitMethodInsn(INVOKEVIRTUAL, LV, "checknumber", "(Ljava/lang/String;)Lorg/luaj/vm2/LuaNumber;", false);
         }
 
         private void konst(int index) {
