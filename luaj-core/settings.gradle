@@ -1,0 +1,3 @@
+// FiguraMC's luaj fork (https://github.com/FiguraMC/luaj, MIT), built from source so the interpreter can be tuned.
+// Included by the main build (includeBuild), which then uses it in place of com.github.FiguraMC.luaj:luaj-core.
+rootProject.name = 'luaj-core'

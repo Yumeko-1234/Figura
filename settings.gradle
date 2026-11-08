@@ -13,3 +13,4 @@ include("fabric")
 include("forge")
 
 rootProject.name = "Figura"
+includeBuild("luaj-core")
