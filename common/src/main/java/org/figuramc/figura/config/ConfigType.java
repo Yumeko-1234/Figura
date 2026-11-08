@@ -25,6 +25,8 @@ public abstract class ConfigType<T> {
     // display
     public Component name;
     public Component tooltip;
+    // shown in light blue in the config screen: matters most for the frame rate around many players (see Configs.markFpsSettings)
+    public boolean fpsImportant;
 
     // values
     public T value;

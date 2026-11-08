@@ -58,8 +58,12 @@ public abstract class AbstractConfigElement extends AbstractContainerElement {
         super.render(gui, mouseX, mouseY, delta);
     }
 
+    // light blue, the settings that matter most for the frame rate around many players
+    public static final int FPS_IMPORTANT_COLOR = 0x8CD2FF;
+
     public void renderTitle(GuiGraphics gui, Font font, int y) {
-        gui.drawString(font, config.name, getX() + 16, y, (config.disabled ? ChatFormatting.DARK_GRAY : ChatFormatting.WHITE).getColor());
+        int color = config.disabled ? ChatFormatting.DARK_GRAY.getColor() : config.fpsImportant ? FPS_IMPORTANT_COLOR : ChatFormatting.WHITE.getColor();
+        gui.drawString(font, config.name, getX() + 16, y, color);
     }
 
     @Override

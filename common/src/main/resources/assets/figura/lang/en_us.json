@@ -453,6 +453,7 @@
     "figura.config.lua_compiler.tooltip": "Script functions that run often are compiled to Java bytecode in the background, running up to twice as fast\nThey behave the same as before, including the instruction limits\nTurning it off stops compiling more functions, the ones already compiled stay until the avatar reloads",
     "figura.config.body_lod_self": "Reduce My Avatar",
     "figura.config.body_lod_self.tooltip": "Also apply Body Detail Reduction and Simplify Avatar Bodies to your own avatar, except for the parts attached to the head\nOnly changes how it renders on your screen, the uploaded avatar stays untouched",
+    "figura.config.fps_important": "Important for the frame rate around many players",
     "figura.config.other_avatar_scripts": "Other Avatars' Scripts",
     "figura.config.other_avatar_scripts.tooltip": "Which scripts of other players' avatars run\nYour own avatar, focused players and players set to full detail always run every script",
     "figura.config.other_avatar_scripts.1": "All",

@@ -376,4 +376,24 @@ public class Configs {
     public static final ConfigType.NetworkFilterConfig NETWORK_FILTER = new ConfigType.NetworkFilterConfig("network_filter", NETWORKING);
 
     public static final ConfigType.EnumConfig LOG_NETWORKING = new ConfigType.EnumConfig("networking_logging", NETWORKING, 0, 4);
+
+    // the settings that matter most for the frame rate around many players: their names are light blue in the config screen,
+    // and their tooltip says so
+    static {
+        markFpsSettings(
+                OTHER_AVATAR_SCRIPTS, AVATAR_RENDER_SCRIPT_BUDGET, AVATAR_TICK_SCRIPT_BUDGET, AVATAR_RENDER_SCRIPT_RATE,
+                PARALLEL_TICK_SCRIPTS, LUA_COMPILER, SHARE_SHADOW_PASS_SCRIPTS, SPREAD_TICK_SCRIPTS,
+                AVATAR_RENDER_DISTANCE, AVATAR_VIEW_CULLING, CULLED_AVATAR_TICK_INTERVAL,
+                AVATAR_LOD_DISTANCE, BODY_LOD, SIMPLIFY_AVATAR_BODIES, FULL_DETAIL_AVATARS, FULL_RATE_ANIMATIONS
+        );
+    }
+
+    private static void markFpsSettings(ConfigType<?>... configs) {
+        for (ConfigType<?> config : configs) {
+            config.fpsImportant = true;
+            config.tooltip = config.tooltip.copy()
+                    .append("\n\n")
+                    .append(FiguraText.of("config.fps_important").withStyle(style -> style.withColor(org.figuramc.figura.gui.widgets.config.AbstractConfigElement.FPS_IMPORTANT_COLOR)));
+        }
+    }
 }
