@@ -179,6 +179,9 @@ public class Configs {
                     org.figuramc.figura.lua.jit.LuaJit.configure(value);
                 }
             };
+    // other players' avatars: 0 every script, 1 only pings (action wheel), 2 only the init script (see Avatar.scriptLevel)
+    public static final ConfigType.EnumConfig
+            OTHER_AVATAR_SCRIPTS = new ConfigType.EnumConfig("other_avatar_scripts", RENDERING, 0, 3);
     public static final ConfigType.EnumConfig
             BODY_LOD = new ConfigType.EnumConfig("body_lod", RENDERING, 0, 4) {
                 @Override

@@ -368,11 +368,20 @@ public final class FiguraBenchmark {
         mc.options.hideGui = true;
         mc.player.connection.sendCommand("time set 6000");
         mc.player.connection.sendCommand("weather clear");
+        if (CROWD_MODE) {
+            // on the ground at the crowd's origin, see spawnCrowd
+            mc.player.getAbilities().flying = false;
+            mc.player.setPos(0.5, -60, 0.5);
+            mc.player.connection.sendCommand("tp @s 0.5 -60 0.5");
+        }
         keepCamera(mc);
 
         String rate = System.getProperty("figura.benchmark.rate");
         if (rate != null)
             Configs.AVATAR_RENDER_SCRIPT_RATE.value = Integer.parseInt(rate);
+        String otherScripts = System.getProperty("figura.benchmark.otherScripts");
+        if (otherScripts != null)
+            Configs.OTHER_AVATAR_SCRIPTS.value = Integer.parseInt(otherScripts);
         String parallelTicks = System.getProperty("figura.benchmark.parallelTicks");
         if (parallelTicks != null)
             Configs.PARALLEL_TICK_SCRIPTS.value = Boolean.parseBoolean(parallelTicks);
@@ -418,7 +427,8 @@ public final class FiguraBenchmark {
         // up to 10 players: rows of five close up, more: rows of ten, further away
         int perRow = n <= 10 ? 5 : 10;
         double spacing = n <= 10 ? 1.6 : 1.3, firstRow = n <= 10 ? 4 : 6, rowGap = n <= 10 ? 2.5 : 2.2;
-        double x0 = mc.player.getX(), y0 = mc.player.getY(), z0 = mc.player.getZ();
+        // the same place in every run (the saved world keeps wherever the player ended up): the flat world's ground at 0, 0
+        double x0 = 0.5, y0 = -60, z0 = 0.5;
         for (int i = 0; i < n; i++) {
             java.util.UUID id = java.util.UUID.nameUUIDFromBytes(("figura-benchmark-crowd-" + i).getBytes(StandardCharsets.UTF_8));
             RemotePlayer player = new RemotePlayer(mc.level, new GameProfile(id, "Crowd" + i));

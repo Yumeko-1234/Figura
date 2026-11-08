@@ -330,6 +330,11 @@ public class Avatar {
 
     // the tick events, may run on a later frame of the same tick (see AvatarManager.runDeferredTicks)
     public void tickScripts() {
+        // events off (Other Avatars' Scripts): only the queued pings run, like a skipped tick
+        if (scriptLevel() > 0) {
+            tickSkipped();
+            return;
+        }
         if (scriptError || luaRuntime == null || !loaded)
             return;
 
@@ -379,9 +384,19 @@ public class Avatar {
         return focusBlocked || culled;
     }
 
+    /**
+     * Which scripts run (Other Avatars' Scripts): 0 all, 1 only the init script and pings, 2 only the init script.
+     * The own avatar, focused players and full detail players always run all of them.
+     */
+    public int scriptLevel() {
+        if (isHost || AvatarCulling.isFocused(owner) || AvatarCulling.isFullDetail(owner))
+            return 0;
+        return Configs.OTHER_AVATAR_SCRIPTS.value;
+    }
+
     public void runPing(int id, byte[] data) {
         events.offer(() -> {
-            if (scriptError || luaRuntime == null || !loaded)
+            if (scriptError || luaRuntime == null || !loaded || scriptLevel() >= 2)
                 return;
 
             LuaValue[] args = PingArg.fromByteArray(data, this);
@@ -417,7 +432,8 @@ public class Avatar {
         // stuff that was not run yet
         flushQueuedEvents();
 
-        if (scriptError || luaRuntime == null || !loaded || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
+        // no events and part render functions with Other Avatars' Scripts below All (pings run by themselves, see runPing)
+        if (scriptError || luaRuntime == null || !loaded || scriptLevel() > 0 || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
             return null;
 
         // run event, timing the render scripts
