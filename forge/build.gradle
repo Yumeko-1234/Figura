@@ -57,6 +57,8 @@ dependencies {
         modRuntimeOnly "blank:figura_extra_fight:0.0.41-forge+1.20.1"
         modRuntimeOnly "blank:oculus-mc1.20.1:1.8.0"
         modRuntimeOnly "blank:embeddium:0.3.31+mc1.20.1"
+        // profiler for -Dfigura.benchmark.spark=true (render thread profile saved to a file)
+        modRuntimeOnly "blank:spark:1.10.53-forge"
         // Oculus' bundled shader preprocessor, nested jars of a mod are not unpacked in the dev runtime (benchmark/libs)
         forgeRuntimeLibrary "blank:jcpp:1.4.14"
     }

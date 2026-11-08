@@ -51,7 +51,10 @@ public final class FiguraBenchmark {
     private static final double DURATION = Double.parseDouble(System.getProperty("figura.benchmark.duration", "60"));
     private static final String RESULTS = System.getProperty("figura.benchmark.results", "benchmark-results.txt");
 
-    private enum State { MENU, LOADING, WARMUP, MEASURE, DONE }
+    // profile the render thread with spark while measuring, saved to a file (spark must be installed)
+    private static final boolean SPARK = Boolean.getBoolean("figura.benchmark.spark");
+
+    private enum State { MENU, LOADING, WARMUP, MEASURE, SAVING, DONE }
     private static State state = State.MENU;
     private static long phaseStart;
 
@@ -97,6 +100,8 @@ public final class FiguraBenchmark {
                     measuring = true;
                     state = State.MEASURE;
                     phaseStart = now;
+                    if (SPARK)
+                        mc.player.connection.sendCommand("spark profiler start --thread * --interval 1");
                     log("measuring for " + DURATION + " s");
                 }
             }
@@ -106,6 +111,19 @@ public final class FiguraBenchmark {
                     measuring = false;
                     double seconds = (now - phaseStart) / 1e9;
                     writeResults(mc, seconds);
+                    if (SPARK) {
+                        mc.player.connection.sendCommand("spark profiler stop --save-to-file");
+                        state = State.SAVING;
+                        phaseStart = now;
+                    } else {
+                        state = State.DONE;
+                        mc.stop();
+                    }
+                }
+            }
+            case SAVING -> {
+                // a few seconds for spark to write the profile
+                if (now - phaseStart >= 8e9) {
                     state = State.DONE;
                     mc.stop();
                 }
@@ -140,9 +158,32 @@ public final class FiguraBenchmark {
         long[] entry = LUA_BY_KIND.computeIfAbsent(kind + (render ? "(render)" : ""), k -> new long[2]);
         entry[0] += nanos;
         entry[1]++;
+        // part render functions (and other functions run directly), by where they are defined
+        if (toRun instanceof org.luaj.vm2.LuaClosure closure) {
+            long[] f = LUA_BY_FUNCTION.computeIfAbsent("part " + where(closure), k -> new long[2]);
+            f[0] += nanos;
+            f[1]++;
+        }
     }
 
     private static final java.util.Map<String, long[]> LUA_BY_KIND = new java.util.TreeMap<>();
+
+    // time per Lua function, keyed by where it is defined: event handlers (LuaEvent.call) and part render functions (Avatar.run)
+    private static final java.util.Map<String, long[]> LUA_BY_FUNCTION = new java.util.HashMap<>();
+
+    public static void onHandler(org.luaj.vm2.LuaFunction function, long nanos) {
+        if (!measuring)
+            return;
+        long[] entry = LUA_BY_FUNCTION.computeIfAbsent("event " + where(function), k -> new long[2]);
+        entry[0] += nanos;
+        entry[1]++;
+    }
+
+    private static String where(Object function) {
+        if (function instanceof org.luaj.vm2.LuaClosure closure)
+            return closure.p.shortsource() + ":" + closure.p.linedefined;
+        return function == null ? "?" : function.getClass().getSimpleName();
+    }
 
     // every avatar model pass (ImmediateAvatarRenderer.render / renderSpecialParts), part render functions included
     public static void onAvatarDraw(long nanos) {
@@ -251,6 +292,15 @@ public final class FiguraBenchmark {
         StringBuilder kinds = new StringBuilder();
         LUA_BY_KIND.forEach((k, v) -> kinds.append(String.format(Locale.ROOT, " %s=%.1fms/s x%d/s", k, v[0] / 1e6 / seconds, Math.round(v[1] / seconds))));
         log("lua by kind:" + kinds);
+        // the most expensive functions, with time per second, calls per second and time per call
+        StringBuilder functions = new StringBuilder();
+        LUA_BY_FUNCTION.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
+                .limit(25)
+                .forEach(e -> functions.append(String.format(Locale.ROOT, "%n    %7.2f ms/s %6d calls/s %8.3f ms/call  %s",
+                        e.getValue()[0] / 1e6 / seconds, Math.round(e.getValue()[1] / seconds),
+                        e.getValue()[0] / 1e6 / Math.max(e.getValue()[1], 1), e.getKey())));
+        log("lua by function:" + functions);
         try {
             Files.writeString(Path.of(RESULTS), line + System.lineSeparator(), StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);

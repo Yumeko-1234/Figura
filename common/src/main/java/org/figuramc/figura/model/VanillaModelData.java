@@ -5,12 +5,13 @@ import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import org.figuramc.figura.math.vector.FiguraVec3;
 
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
 
 public class VanillaModelData {
 
-    public final Map<ParentType, PartData> partMap = new HashMap<>() {{
+    public final Map<ParentType, PartData> partMap = new EnumMap<>(ParentType.class) {{
         for (ParentType value : ParentType.values()) {
             if (value.provider != null)
                 put(value, new PartData());

@@ -81,9 +81,13 @@ public class LuaEvent {
             return callPiped(args);
 
         LuaTable result = new LuaTable();
+        boolean timed = org.figuramc.figura.benchmark.FiguraBenchmark.measuring;
         for (LuaFunction function : functions) {
             FiguraMod.pushProfiler(function.name());
+            long start = timed ? System.nanoTime() : 0L;
             Varargs val = function.invoke(args);
+            if (timed)
+                org.figuramc.figura.benchmark.FiguraBenchmark.onHandler(function, System.nanoTime() - start);
             for (int i = 0; i < val.narg(); i++)
                 result.insert(0, val.arg(i + 1));
             FiguraMod.popProfiler();

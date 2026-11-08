@@ -23,6 +23,7 @@ for pass in "$@"; do
     fi
     [ -n "${rate:-}" ] && args="$args -Dfigura.benchmark.rate=$rate"
     [ -n "${budget:-}" ] && args="$args -Dfigura.benchmark.budget=$budget"
+    [ -n "${SPARK:-}" ] && args="$args -Dfigura.benchmark.spark=true"
     echo "=== $label ($args)"
     ./gradlew :forge:runClient -Pbenchmark "-PbenchmarkArgs=$args" --console=plain > "benchmark/results/$label-gradle.log" 2>&1
     echo "=== $label exit $?"

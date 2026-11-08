@@ -211,6 +211,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             level = Math.max(level, FiguraModelPartReader.SIMPLIFY_LOD_LEVEL);
         Lod lod = level > 0 && lods != null ? lods[Math.min(level, lods.length) - 1] : null;
 
+        List<Vertex>[] lists = vertexLists();
         for (int i = 0; i < facesByTexture.size(); i++) {
             if (remainingComplexity[0] <= 0)
                 return false;
@@ -222,10 +223,26 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
                 avatarRenderer.pushFaces(lod.facesByTexture.get(i), faces, remainingComplexity, textures.get(i), lod.vertices.get(i), lod.packed(i), this);
             } else {
                 int count = faces + Math.min(remainingComplexity[0], 0);
-                avatarRenderer.pushFaces(count, count, remainingComplexity, textures.get(i), vertices.get(i), packedVertices(i), this);
+                avatarRenderer.pushFaces(count, count, remainingComplexity, textures.get(i), lists[i], packedVertices(i), this);
             }
         }
         return true;
+    }
+
+    // the vertex lists by texture index, read every frame: an array instead of a map lookup per texture per part
+    // (the map is filled once when the model is read and never changes, scripts only edit the vertices in the lists)
+    private List<Vertex>[] vertexLists;
+
+    @SuppressWarnings("unchecked")
+    private List<Vertex>[] vertexLists() {
+        List<Vertex>[] lists = vertexLists;
+        if (lists == null || lists.length != facesByTexture.size()) {
+            lists = new List[facesByTexture.size()];
+            for (int i = 0; i < lists.length; i++)
+                lists[i] = vertices.get(i);
+            vertexLists = lists;
+        }
+        return lists;
     }
 
     // box around the own vertices of this part (not its children), null when it has none
@@ -265,6 +282,9 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             return;
 
         // get part data
+        // most parts follow no vanilla part, the map only has the parent types that do
+        if (this.parentType.provider == null)
+            return;
         VanillaModelData.PartData partData = vanillaModelData.partMap.get(this.parentType);
         if (partData == null)
             return;
