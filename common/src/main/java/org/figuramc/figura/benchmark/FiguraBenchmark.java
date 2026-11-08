@@ -3,6 +3,8 @@ package org.figuramc.figura.benchmark;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.player.RemotePlayer;
+import com.mojang.authlib.GameProfile;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
@@ -36,7 +38,8 @@ import java.util.Locale;
  * <p>
  * Properties (all -Dfigura.benchmark.*): label (required), avatar (path to the .nbt, none = no avatar), otherPlayer (default true:
  * the avatar is treated like another player's, so the render script limits and smoothing apply to it), warmup and duration
- * (seconds, default 20 and 60), rate and budget (Render Script Rate / Budget for this run), results (file to append to).
+ * (seconds, default 20 and 60), rate and budget (Render Script Rate / Budget for this run), results (file to append to),
+ * crowd (a folder of .nbt avatars, one fake player each, see spawnCrowd).
  */
 public final class FiguraBenchmark {
 
@@ -50,6 +53,12 @@ public final class FiguraBenchmark {
     private static final double WARMUP = Double.parseDouble(System.getProperty("figura.benchmark.warmup", "20"));
     private static final double DURATION = Double.parseDouble(System.getProperty("figura.benchmark.duration", "60"));
     private static final String RESULTS = System.getProperty("figura.benchmark.results", "benchmark-results.txt");
+    // a folder of .nbt avatars: one client-side player per avatar, in rows in front of the camera (first person, own avatar off)
+    private static final String CROWD = System.getProperty("figura.benchmark.crowd", "");
+    private static final boolean CROWD_MODE = !CROWD.isBlank();
+    // false: the same players without avatars (the cost of the players alone)
+    private static final boolean CROWD_AVATARS = !"false".equalsIgnoreCase(System.getProperty("figura.benchmark.crowdAvatars"));
+    private static int crowdSize;
 
     // profile the render thread with spark while measuring, saved to a file (spark must be installed)
     private static final boolean SPARK = Boolean.getBoolean("figura.benchmark.spark");
@@ -224,7 +233,8 @@ public final class FiguraBenchmark {
         mc.options.enableVsync().set(false);
         mc.options.framerateLimit().set(260);
         mc.options.pauseOnLostFocus = false;
-        mc.options.setCameraType(CameraType.THIRD_PERSON_FRONT);
+        // one avatar: third person, the player facing the camera; a crowd: first person, the crowd in front
+        mc.options.setCameraType(CROWD_MODE ? CameraType.FIRST_PERSON : CameraType.THIRD_PERSON_FRONT);
         mc.options.hideGui = true;
         mc.player.connection.sendCommand("time set 6000");
         mc.player.connection.sendCommand("weather clear");
@@ -236,6 +246,9 @@ public final class FiguraBenchmark {
         String budget = System.getProperty("figura.benchmark.budget");
         if (budget != null)
             Configs.AVATAR_RENDER_SCRIPT_BUDGET.value = Float.parseFloat(budget);
+
+        if (CROWD_MODE)
+            spawnCrowd(mc);
 
         if (!AVATAR.isBlank()) {
             try {
@@ -250,16 +263,51 @@ public final class FiguraBenchmark {
         }
     }
 
+    // one client-side player per avatar in the crowd folder, standing in rows of five in front of the camera, facing it.
+    // Like players from a server for the renderers (Epic Fight, Figura, Oculus), but only on this client: nobody moves them.
+    // Their UUIDs are name based (version 3), so Figura never asks its backend for their avatars, and they get the default
+    // permission level like any other player's.
+    private static void spawnCrowd(Minecraft mc) {
+        File[] files = new File(CROWD).listFiles((dir, name) -> name.endsWith(".nbt"));
+        if (files == null || files.length == 0) {
+            log("no avatars in the crowd folder " + CROWD);
+            return;
+        }
+        Arrays.sort(files);
+        double x0 = mc.player.getX(), y0 = mc.player.getY(), z0 = mc.player.getZ();
+        for (int i = 0; i < files.length; i++) {
+            java.util.UUID id = java.util.UUID.nameUUIDFromBytes(("figura-benchmark-crowd-" + i).getBytes(StandardCharsets.UTF_8));
+            RemotePlayer player = new RemotePlayer(mc.level, new GameProfile(id, "Crowd" + i));
+            int row = i / 5, col = i % 5;
+            double x = x0 + (col - 2) * 1.6 + (row % 2) * 0.8;
+            double z = z0 + 4 + row * 2.5;
+            player.setId(2_000_000 + i);
+            player.moveTo(x, y0, z, 180, 0);
+            player.setYHeadRot(180);
+            player.setYBodyRot(180);
+            player.setOldPosAndRot();
+            mc.level.addPlayer(player.getId(), player);
+            if (CROWD_AVATARS) try {
+                AvatarManager.setAvatar(id, NbtIo.readCompressed(files[i]));
+                log("crowd " + i + ": " + files[i].getName());
+            } catch (IOException e) {
+                FiguraMod.LOGGER.error("[benchmark] could not read the avatar " + files[i], e);
+            }
+        }
+        crowdSize = files.length;
+    }
+
     // the same view every frame of every run
     private static void keepCamera(Minecraft mc) {
         if (mc.player == null)
             return;
-        mc.player.setYRot(180);
-        mc.player.setXRot(10);
-        mc.player.setYHeadRot(180);
-        mc.player.setYBodyRot(180);
-        mc.player.yRotO = 180;
-        mc.player.xRotO = 10;
+        float yaw = CROWD_MODE ? 0 : 180, pitch = CROWD_MODE ? 8 : 10;
+        mc.player.setYRot(yaw);
+        mc.player.setXRot(pitch);
+        mc.player.setYHeadRot(yaw);
+        mc.player.setYBodyRot(yaw);
+        mc.player.yRotO = yaw;
+        mc.player.xRotO = pitch;
     }
 
     private static void writeResults(Minecraft mc, double seconds) {
@@ -284,7 +332,7 @@ public final class FiguraBenchmark {
         String line = String.format(Locale.ROOT,
                 "%s | avatar=%s otherPlayer=%s rate=%d budget=%.2f | frames=%d avgFps=%.1f p50=%.2fms p99=%.2fms max=%.2fms low1%%=%.1ffps"
                         + " | lua=%.1fms/s (render %.1f, other %.1f) avatarDraw=%.3fms/frame",
-                LABEL, AVATAR.isBlank() ? "none" : Path.of(AVATAR).getFileName(), HOST_AS_OTHER,
+                LABEL, CROWD_MODE ? "crowd:" + Path.of(CROWD).getFileName() + "x" + crowdSize + (CROWD_AVATARS ? "" : "-noavatars") : AVATAR.isBlank() ? "none" : Path.of(AVATAR).getFileName(), HOST_AS_OTHER,
                 Configs.AVATAR_RENDER_SCRIPT_RATE.value, Configs.AVATAR_RENDER_SCRIPT_BUDGET.value,
                 n, avgFps, p50, p99, max, low1, luaMsPerSecond, luaRenderMsPerSecond, luaMsPerSecond - luaRenderMsPerSecond, drawMsPerFrame);
         log(line);

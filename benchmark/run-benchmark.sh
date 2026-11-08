@@ -7,6 +7,7 @@
 #
 # usage: benchmark/run-benchmark.sh label:avatar[:rate[:budget]] ...
 #   avatar: file name in benchmark/avatars, or "none"; rate 0 = render scripts every frame
+#   CROWD=<folder in benchmark/avatars>: one fake player per .nbt avatar in it (avatar should be none)
 #   example: benchmark/run-benchmark.sh baseline:none jiang-unlimited:jiang_linyuan.nbt:0 jiang-default:jiang_linyuan.nbt
 set -u
 cd "$(dirname "$0")/.."
@@ -24,6 +25,8 @@ for pass in "$@"; do
     [ -n "${rate:-}" ] && args="$args -Dfigura.benchmark.rate=$rate"
     [ -n "${budget:-}" ] && args="$args -Dfigura.benchmark.budget=$budget"
     [ -n "${SPARK:-}" ] && args="$args -Dfigura.benchmark.spark=true"
+    [ -n "${CROWD:-}" ] && args="$args -Dfigura.benchmark.crowd=../avatars/$CROWD"
+    [ -n "${CROWD_NOAVATARS:-}" ] && args="$args -Dfigura.benchmark.crowdAvatars=false"
     [ -n "${JIT:-}" ] && args="$args -Dfigura.luaJit=$([ "$JIT" = 0 ] && echo false || echo true)"
     echo "=== $label ($args)"
     extra=""; [ -n "${BHOPT:-}" ] && extra="-Pbhopt=$BHOPT"
