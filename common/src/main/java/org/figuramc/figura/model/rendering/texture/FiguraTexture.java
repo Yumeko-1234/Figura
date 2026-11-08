@@ -106,6 +106,7 @@ public class FiguraTexture extends SimpleTexture {
             this.texture = null;
             // the image that will be uploaded is at hand here, usually off the render thread
             this.alphaKind = scanAlpha(this.upload);
+            this.coverage = Coverage.of(this.upload);
         }
     }
 
@@ -122,6 +123,72 @@ public class FiguraTexture extends SimpleTexture {
             }
         }
         return ALPHA_BINARY;
+    }
+
+    // which texels of the image on the GPU can show at all, see Coverage; null until known
+    private volatile Coverage coverage;
+
+    public Coverage getCoverage() {
+        return coverage;
+    }
+
+    // where the image has pixels that draw anything, one bit per tile of texels (one texel, or 2x2, 4x4... on big textures,
+    // a tile is set when any texel in it is): bits for texels that are not fully transparent (alpha > 0), and for texels that
+    // are not fully zero (any channel > 0, for additive render types). Rebuilt (a new object) whenever the image changes.
+    public static final class Coverage {
+        // at most this many tiles, 2 x 32 KB of bits
+        private static final int MAX_TILES = 1 << 18;
+        public final int width, height;
+        private final int tile, cols, rows;
+        private final long[] alpha, color;
+
+        private Coverage(int width, int height, int tile) {
+            this.width = width;
+            this.height = height;
+            this.tile = tile;
+            this.cols = (width + tile - 1) / tile;
+            this.rows = (height + tile - 1) / tile;
+            this.alpha = new long[(cols * rows + 63) >> 6];
+            this.color = new long[alpha.length];
+        }
+
+        static Coverage of(NativeImage image) {
+            if (image == null || image.format() != NativeImage.Format.RGBA)
+                return null;
+            int w = image.getWidth(), h = image.getHeight();
+            int tile = 1;
+            while ((long) ((w + tile - 1) / tile) * ((h + tile - 1) / tile) > MAX_TILES)
+                tile *= 2;
+            Coverage c = new Coverage(w, h, tile);
+            for (int y = 0; y < h; y++) {
+                int rowBase = (y / tile) * c.cols;
+                for (int x = 0; x < w; x++) {
+                    int rgba = image.getPixelRGBA(x, y);
+                    if (rgba == 0)
+                        continue;
+                    int bit = rowBase + x / tile;
+                    c.color[bit >> 6] |= 1L << bit;
+                    if ((rgba >>> 24) != 0)
+                        c.alpha[bit >> 6] |= 1L << bit;
+                }
+            }
+            return c;
+        }
+
+        // if any texel from x0, y0 to x1, y1 (inclusive, within the image) can draw: anything with alpha, or anything at all
+        public boolean any(int x0, int y0, int x1, int y1, boolean anyColor) {
+            long[] bits = anyColor ? color : alpha;
+            int c0 = x0 / tile, c1 = x1 / tile, r0 = y0 / tile, r1 = y1 / tile;
+            for (int r = r0; r <= r1; r++) {
+                int base = r * cols;
+                for (int col = c0; col <= c1; col++) {
+                    int bit = base + col;
+                    if ((bits[bit >> 6] & (1L << bit)) != 0)
+                        return true;
+                }
+            }
+            return false;
+        }
     }
 
     // ALPHA_BINARY when the image on the GPU only has fully opaque and fully transparent pixels
@@ -274,6 +341,7 @@ public class FiguraTexture extends SimpleTexture {
                     ready = factor > 1 ? downscale(full, factor) : full;
                     // scripts may have changed the pixels since the last scan
                     alphaKind = scanAlpha(ready);
+                    coverage = Coverage.of(ready);
                 }
 
                 // the host's image and the ones scripts use stay here, the others are freed once on the GPU

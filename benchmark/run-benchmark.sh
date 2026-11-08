@@ -26,6 +26,7 @@ for pass in "$@"; do
     [ -n "${budget:-}" ] && args="$args -Dfigura.benchmark.budget=$budget"
     [ -n "${SPARK:-}" ] && args="$args -Dfigura.benchmark.spark=true"
     [ -n "${CROWD:-}" ] && args="$args -Dfigura.benchmark.crowd=../avatars/$CROWD"
+    [ -n "${EXTRA_ARGS:-}" ] && args="$args $EXTRA_ARGS"
     [ -n "${CROWD_NOAVATARS:-}" ] && args="$args -Dfigura.benchmark.crowdAvatars=false"
     [ -n "${JIT:-}" ] && args="$args -Dfigura.luaJit=$([ "$JIT" = 0 ] && echo false || echo true)"
     echo "=== $label ($args)"

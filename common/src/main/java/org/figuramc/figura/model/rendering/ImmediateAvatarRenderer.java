@@ -927,6 +927,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         ret.renderType = null;
         ret.opaqueRenderType = null;
         ret.figuraTexture = null;
+        ret.skipEmpty = 0;
         ret.region = null;
         ret.atlasRenderType = null;
         ret.atlasOpaqueRenderType = null;
@@ -958,6 +959,12 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         if (figuraTexture == null)
             return ret;
         ret.figuraTexture = figuraTexture;
+        // render types that draw nothing for fully transparent texels (alpha tested), or for fully zero ones (additive)
+        ret.skipEmpty = switch (types) {
+            case CUTOUT, CUTOUT_CULL, TRANSLUCENT, TRANSLUCENT_CULL -> 1;
+            case EMISSIVE, EYES -> 2;
+            default -> 0;
+        };
         ret.opaqueRenderType = opaqueRenderTypeFor(types, id);
 
         AvatarAtlas.Region region = atlasRegion(figuraTexture);
@@ -1028,6 +1035,22 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         FiguraTexture figuraTexture = vertexData.figuraTexture;
         boolean opaque = figuraTexture != null && customization.alpha >= 1f && figuraTexture.getAlphaKind() == FiguraTexture.ALPHA_BINARY;
 
+        // quads showing only texels that draw nothing with this render type are not sent (the model's own uvs on the avatar's
+        // own texture; vertices scripts can reach, blended ones and parts with a uv matrix are always sent in full)
+        int objectCount = vertCount;
+        if (STRIP_EMPTY_QUADS && vertexData.skipEmpty != 0 && figuraTexture != null && packed != null && !blended && owner != null
+                && vertCount * FiguraModelPart.PACKED_STRIDE == packed.length && identityUv(customization.uvMatrix)) {
+            float[] visible = owner.visiblePacked(packed, figuraTexture, w, h, vertexData.skipEmpty == 2);
+            if (visible != packed) {
+                if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                    org.figuramc.figura.benchmark.FiguraBenchmark.onStripped(vertCount - visible.length / FiguraModelPart.PACKED_STRIDE);
+                packed = visible;
+                vertCount = visible.length / FiguraModelPart.PACKED_STRIDE;
+                if (vertCount == 0)
+                    return;
+            }
+        }
+
         RenderType renderType;
         AvatarAtlas.Region region = null;
         if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount, blended, vertexData.region)) {
@@ -1044,9 +1067,17 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // everything the write needs is copied now, the vertices themselves are read when the buffer is consumed
         // (the customization is a copy owned by the stack, so its values are the same as when the buffer is consumed)
-        VERTEX_BUFFER.add(renderType, vertexData.primary).set(
-                vertCount, vertices, packed, owner, customization, w, h, vertexData, region
-        );
+        Batch batch = VERTEX_BUFFER.add(renderType, vertexData.primary);
+        batch.set(vertCount, vertices, packed, owner, customization, w, h, vertexData, region);
+        // if a script gets the vertex objects before the batch is written, all of them are drawn
+        batch.objectCount = objectCount;
+    }
+
+    // turned off with -Dfigura.stripEmptyQuads=false
+    private static final boolean STRIP_EMPTY_QUADS = !"false".equalsIgnoreCase(System.getProperty("figura.stripEmptyQuads"));
+
+    private static boolean identityUv(FiguraMat3 m) {
+        return m.v11 == 1 && m.v12 == 0 && m.v13 == 0 && m.v21 == 0 && m.v22 == 1 && m.v23 == 0;
     }
 
     // uv bounds (in texture pixels) of packed vertex arrays: min u, min v, max u, max v, computed once per array
@@ -1113,6 +1144,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
     private static class VertexData {
         public RenderType renderType;
+        // 1: quads whose texels are all fully transparent draw nothing, 2: only fully zero ones do (additive), 0: unknown
+        public int skipEmpty;
         // the cutout twin of renderType, used when the texture has no partly transparent pixels, may be null
         public RenderType opaqueRenderType;
         // the avatar texture drawn, null for skins and other textures that are not the avatar's
@@ -1141,6 +1174,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         private float[] packed;
         private FiguraModelPart owner;
         private int vertCount;
+        // the vertex objects to draw when they have to be read instead of the packed array (vertCount may count fewer quads)
+        int objectCount;
 
         private double p11, p12, p13, p14, p21, p22, p23, p24, p31, p32, p33, p34, p41, p42, p43, p44;
         private double n11, n12, n13, n21, n22, n23, n31, n32, n33;
@@ -1154,6 +1189,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             this.vertCount = vertCount;
             this.vertices = vertices;
             this.packed = packed;
+            this.objectCount = vertCount;
             this.owner = owner;
 
             FiguraMat4 p = customization.positionMatrix;
@@ -1264,7 +1300,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 return;
             }
 
-            for (int i = 0; i < vertCount; i++) {
+            for (int i = 0, n = Math.min(objectCount, vertices.size()); i < n; i++) {
                 Vertex v = vertices.get(i);
                 double vx = v.x, vy = v.y, vz = v.z;
                 double x = p11 * vx + p12 * vy + p13 * vz + p14;
@@ -1320,7 +1356,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 return;
             }
 
-            for (int i = 0; i < vertCount; i++) {
+            for (int i = 0, n = Math.min(objectCount, vertices.size()); i < n; i++) {
                 Vertex v = vertices.get(i);
                 double vx = v.x, vy = v.y, vz = v.z;
                 double x = p11 * vx + p12 * vy + p13 * vz + p14;
@@ -1376,6 +1412,9 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                     org.figuramc.figura.benchmark.FiguraBenchmark.onRenderType(renderType);
                 VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
                 List<Batch> batches = entry.getValue();
+                if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                    for (Batch batch : batches)
+                        org.figuramc.figura.benchmark.FiguraBenchmark.onSent(batch.vertCount);
 
                 // one bulk writer for the whole render type, so it is pushed in full chunks instead of once per part
                 SodiumCompat.BulkWriter bulk = SodiumCompat.writerFor(vertexConsumer, renderType);

@@ -138,6 +138,95 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         return packed;
     }
 
+    // -- quads that draw nothing: not sent at all -- //
+
+    // packed arrays with the quads that show nothing with a texture left out, by source array, texture and mode
+    private VisibleQuads[] visibleQuads;
+
+    private static final class VisibleQuads {
+        float[] source, result;
+        FiguraTexture texture;
+        FiguraTexture.Coverage coverage;
+        boolean anyColor;
+    }
+
+    // the packed vertices without the quads whose texels (as far as the uvs reach, nearest sampling) all draw nothing:
+    // fully transparent ones under alpha tested render types, fully zero ones under additive ones (anyColor)
+    // w, h: the texture's size in the model's uv pixels; the array itself when every quad can show or nothing is known yet
+    public float[] visiblePacked(float[] packed, FiguraTexture texture, double w, double h, boolean anyColor) {
+        FiguraTexture.Coverage coverage = texture.getCoverage();
+        if (coverage == null || w <= 0 || h <= 0 || packed.length % (PACKED_STRIDE * 4) != 0)
+            return packed;
+        VisibleQuads[] cache = visibleQuads;
+        if (cache != null) {
+            for (VisibleQuads e : cache) {
+                if (e.source == packed && e.texture == texture && e.anyColor == anyColor) {
+                    if (e.coverage != coverage) {
+                        e.coverage = coverage;
+                        e.result = strip(packed, coverage, w, h, anyColor);
+                    }
+                    return e.result;
+                }
+            }
+        }
+        VisibleQuads e = new VisibleQuads();
+        e.source = packed;
+        e.texture = texture;
+        e.coverage = coverage;
+        e.anyColor = anyColor;
+        e.result = strip(packed, coverage, w, h, anyColor);
+        visibleQuads = cache == null ? new VisibleQuads[] {e} : java.util.Arrays.copyOf(cache, cache.length + 1);
+        visibleQuads[visibleQuads.length - 1] = e;
+        return e.result;
+    }
+
+    private static float[] strip(float[] packed, FiguraTexture.Coverage coverage, double w, double h, boolean anyColor) {
+        double sx = coverage.width / w, sy = coverage.height / h;
+        int quad = PACKED_STRIDE * 4;
+        float[] out = null;
+        int n = 0;
+        for (int o = 0; o < packed.length; o += quad) {
+            double minU = Double.MAX_VALUE, minV = Double.MAX_VALUE, maxU = -Double.MAX_VALUE, maxV = -Double.MAX_VALUE;
+            for (int k = o; k < o + quad; k += PACKED_STRIDE) {
+                double u = packed[k + 3] * sx, v = packed[k + 4] * sy;
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            // every texel a fragment of the quad can sample, edges included, with the texture's repeat wrapping
+            int x0 = (int) Math.floor(minU - 1e-3), x1 = (int) Math.floor(maxU + 1e-3);
+            int y0 = (int) Math.floor(minV - 1e-3), y1 = (int) Math.floor(maxV + 1e-3);
+            boolean visible = !Double.isFinite(minU + maxU + minV + maxV) || anyWrapped(coverage, x0, y0, x1, y1, anyColor);
+            if (visible) {
+                if (out != null)
+                    System.arraycopy(packed, o, out, n, quad);
+                n += quad;
+            } else if (out == null) {
+                out = new float[packed.length];
+                System.arraycopy(packed, 0, out, 0, n);
+            }
+        }
+        return out == null ? packed : java.util.Arrays.copyOf(out, n);
+    }
+
+    private static boolean anyWrapped(FiguraTexture.Coverage c, int x0, int y0, int x1, int y1, boolean anyColor) {
+        int w = c.width, h = c.height;
+        // a quad over the whole width or height of the texture: kept
+        if (x1 - x0 + 1 >= w || y1 - y0 + 1 >= h)
+            return true;
+        int ax = Math.floorMod(x0, w), bx = ax + (x1 - x0);
+        int ay = Math.floorMod(y0, h), by = ay + (y1 - y0);
+        // split the ranges where they wrap around
+        int[][] xs = bx < w ? new int[][] {{ax, bx}} : new int[][] {{ax, w - 1}, {0, bx - w}};
+        int[][] ys = by < h ? new int[][] {{ay, by}} : new int[][] {{ay, h - 1}, {0, by - h}};
+        for (int[] xr : xs)
+            for (int[] yr : ys)
+                if (c.any(xr[0], yr[0], xr[1], yr[1], anyColor))
+                    return true;
+        return false;
+    }
+
     // if a script got hold of the vertex objects, so only they are up to date
     public boolean verticesExposed() {
         return verticesExposed;
