@@ -170,7 +170,14 @@ public class Configs {
             AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
             SIMPLIFY_AVATAR_BODIES = new ConfigType.BoolConfig("simplify_avatar_bodies", RENDERING, false),
             CACHE_PART_MATRICES = new ConfigType.BoolConfig("cache_part_matrices", RENDERING, true),
-            SHARE_SHADOW_PASS_SCRIPTS = new ConfigType.BoolConfig("share_shadow_pass_scripts", RENDERING, true);
+            SHARE_SHADOW_PASS_SCRIPTS = new ConfigType.BoolConfig("share_shadow_pass_scripts", RENDERING, true),
+            LUA_COMPILER = new ConfigType.BoolConfig("lua_compiler", RENDERING, true) {
+                @Override
+                public void onChange() {
+                    super.onChange();
+                    org.figuramc.figura.lua.jit.LuaJit.configure(value);
+                }
+            };
     public static final ConfigType.EnumConfig
             BODY_LOD = new ConfigType.EnumConfig("body_lod", RENDERING, 0, 4) {
                 @Override

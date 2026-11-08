@@ -1,8 +1,8 @@
 package org.figuramc.figura.lua.jit;
 
-import org.luaj.vm2.CompiledClosure;
+import org.figuramc.figura.FiguraMod;
+import org.luaj.vm2.CompiledFunction;
 import org.luaj.vm2.Lua;
-import org.luaj.vm2.LuaClosure;
 import org.luaj.vm2.LuaValue;
 import org.luaj.vm2.Prototype;
 import org.objectweb.asm.ClassWriter;
@@ -10,41 +10,48 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Compiles Lua functions (luaj prototypes) to JVM bytecode.
  * <p>
- * Each prototype becomes a hidden class extending {@link CompiledClosure}, whose {@code execute} does what the interpreter
+ * Each prototype becomes a hidden class extending {@link CompiledFunction}, whose {@code execute} does what the interpreter
  * (LuaClosure.execute) does for each of its instructions, as straight-line bytecode with real jumps instead of a dispatch loop:
  * the same stack array, upvalues, value operations, calls and call frames, so a compiled function behaves like the interpreted one.
  * Instructions are counted per block for the instruction limit (count hook), and the call frame's instruction is kept up to date
  * wherever a call or an error can happen, so error positions and tracebacks stay exact.
  * <p>
- * Phase 2: compiles whole chunks when enabled with -Dfigura.luaJit=true. Functions it can't compile stay interpreted.
+ * Tiered: functions run interpreted until they were called {@link #HOT_CALLS} times, then they are compiled on a background
+ * thread and every closure of them switches to the compiled code on its next call. Functions it can't compile stay interpreted.
+ * The classes are hidden classes without strong links, unloaded together with the avatar's functions.
  */
 public final class LuaJit implements Opcodes {
 
-    public static final boolean ENABLED = Boolean.getBoolean("figura.luaJit");
+    /** -Dfigura.luaJit=true / false overrides the config */
+    private static final String PROPERTY = System.getProperty("figura.luaJit");
+    /** calls before a function is compiled */
+    public static final int HOT_CALLS = Integer.getInteger("figura.luaJit.hotCalls", 50);
 
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
     private static final AtomicInteger COMPILED = new AtomicInteger(), FAILED = new AtomicInteger();
     private static volatile boolean failureLogged;
+    private static volatile ExecutorService worker;
 
     private static final String SELF = "org/figuramc/figura/lua/jit/LuaJitFunction";
-    private static final String CC = "org/luaj/vm2/CompiledClosure", LC = "org/luaj/vm2/LuaClosure", LV = "org/luaj/vm2/LuaValue",
+    private static final String CC = "org/luaj/vm2/CompiledFunction", LC = "org/luaj/vm2/LuaClosure", LV = "org/luaj/vm2/LuaValue",
             VA = "org/luaj/vm2/Varargs", UV = "org/luaj/vm2/UpValue", PR = "org/luaj/vm2/Prototype",
             ST = "org/luaj/vm2/LuaThread$State", CF = "org/luaj/vm2/lib/DebugLib$CallFrame", TV = "org/luaj/vm2/TailcallVarargs",
             LT = "org/luaj/vm2/LuaTable";
     private static final String D_LV = "L" + LV + ";", D_VA = "L" + VA + ";", D_STACK = "[L" + LV + ";", D_UPS = "[L" + UV + ";",
-            D_ST = "L" + ST + ";", D_CF = "L" + CF + ";";
+            D_ST = "L" + ST + ";", D_CF = "L" + CF + ";", D_LC = "L" + LC + ";";
 
-    // locals of the generated execute(LuaValue[] stack, Varargs varargs)
-    private static final int THIS = 0, STACK = 1, VARARGS = 2, K = 3, OPENUPS = 4, V = 5, TOP = 6, HOOK = 7, FRAME = 8, PC = 9,
-            TMP = 10, RET = 11, ERR = 12;
+    // locals of the generated execute(LuaClosure cl, LuaValue[] stack, Varargs varargs)
+    private static final int CL = 1, STACK = 2, VARARGS = 3, K = 4, OPENUPS = 5, V = 6, TOP = 7, HOOK = 8, FRAME = 9, PC = 10,
+            TMP = 11, RET = 12, ERR = 13;
 
     private LuaJit() {}
 
@@ -56,7 +63,36 @@ public final class LuaJit implements Opcodes {
         return FAILED.get();
     }
 
-    /** Compiles the prototype and every function defined in it; the ones that fail stay interpreted. */
+    /** Turns compiling hot functions on or off (the system property wins over the config). Functions compiled stay compiled. */
+    public static void configure(boolean enabled) {
+        if (PROPERTY != null)
+            enabled = Boolean.parseBoolean(PROPERTY);
+        if (enabled) {
+            CompiledFunction.listener = LuaJit::queue;
+            CompiledFunction.threshold = Math.max(HOT_CALLS, 1);
+        } else {
+            CompiledFunction.threshold = 0;
+            CompiledFunction.listener = null;
+        }
+    }
+
+    private static void queue(Prototype p) {
+        ExecutorService w = worker;
+        if (w == null) {
+            synchronized (LuaJit.class) {
+                if ((w = worker) == null)
+                    worker = w = Executors.newSingleThreadExecutor(r -> {
+                        Thread t = new Thread(r, "Figura Lua compiler");
+                        t.setDaemon(true);
+                        t.setPriority(Thread.MIN_PRIORITY);
+                        return t;
+                    });
+            }
+        }
+        w.execute(() -> compile(p));
+    }
+
+    /** Compiles the prototype and every function defined in it now; the ones that fail stay interpreted. */
     public static void compileAll(Prototype p) {
         compile(p);
         if (p.p != null)
@@ -64,29 +100,21 @@ public final class LuaJit implements Opcodes {
                 compileAll(child);
     }
 
-    /** Compiles one prototype, its closures are made compiled from now on. */
+    /** Compiles one prototype, its closures run the compiled code from their next call. */
     public static boolean compile(Prototype p) {
+        if (p.compiled != null)
+            return true;
         try {
             byte[] bytes = generate(p);
             MethodHandles.Lookup hidden = LOOKUP.defineHiddenClass(bytes, true);
-            MethodHandle ctor = hidden.findConstructor(hidden.lookupClass(), MethodType.methodType(void.class, Prototype.class, LuaValue.class))
-                    .asType(MethodType.methodType(LuaClosure.class, Prototype.class, LuaValue.class));
-            p.compiled = (proto, env) -> {
-                try {
-                    return (LuaClosure) ctor.invokeExact(proto, env);
-                } catch (RuntimeException | Error e) {
-                    throw e;
-                } catch (Throwable t) {
-                    throw new RuntimeException(t);
-                }
-            };
+            p.compiled = (CompiledFunction) hidden.findConstructor(hidden.lookupClass(), MethodType.methodType(void.class)).invoke();
             COMPILED.incrementAndGet();
             return true;
         } catch (Throwable t) {
             FAILED.incrementAndGet();
             if (!failureLogged) {
                 failureLogged = true;
-                org.figuramc.figura.FiguraMod.LOGGER.warn("Could not compile a Lua function ({}:{}), it stays interpreted (further failures are not logged)",
+                FiguraMod.LOGGER.warn("Could not compile a Lua function ({}:{}), it stays interpreted (further failures are not logged)",
                         p.shortsource(), p.linedefined, t);
             }
             return false;
@@ -105,17 +133,15 @@ public final class LuaJit implements Opcodes {
         cw.visit(V17, ACC_PUBLIC | ACC_FINAL | ACC_SUPER, SELF, null, CC, null);
         cw.visitSource(p.shortsource(), null);
 
-        MethodVisitor init = cw.visitMethod(ACC_PUBLIC, "<init>", "(L" + PR + ";" + D_LV + ")V", null, null);
+        MethodVisitor init = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
         init.visitCode();
         init.visitVarInsn(ALOAD, 0);
-        init.visitVarInsn(ALOAD, 1);
-        init.visitVarInsn(ALOAD, 2);
-        init.visitMethodInsn(INVOKESPECIAL, CC, "<init>", "(L" + PR + ";" + D_LV + ")V", false);
+        init.visitMethodInsn(INVOKESPECIAL, CC, "<init>", "()V", false);
         init.visitInsn(RETURN);
         init.visitMaxs(0, 0);
         init.visitEnd();
 
-        MethodVisitor mv = cw.visitMethod(ACC_PROTECTED, "execute", "(" + D_STACK + D_VA + ")" + D_VA, null, null);
+        MethodVisitor mv = cw.visitMethod(ACC_PROTECTED, "execute", "(" + D_LC + D_STACK + D_VA + ")" + D_VA, null, null);
         mv.visitCode();
         new Body(p, mv).emit();
         mv.visitMaxs(0, 0);
@@ -220,20 +246,9 @@ public final class LuaJit implements Opcodes {
         }
 
         void emit() {
-            // line, call or return hooks: the interpreter
-            Label compiled = new Label();
-            mv.visitVarInsn(ALOAD, THIS);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "mustInterpret", "()Z", false);
-            mv.visitJumpInsn(IFEQ, compiled);
-            mv.visitVarInsn(ALOAD, THIS);
-            mv.visitVarInsn(ALOAD, STACK);
-            mv.visitVarInsn(ALOAD, VARARGS);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "interpret", "(" + D_STACK + D_VA + ")" + D_VA, false);
-            mv.visitInsn(ARETURN);
-            mv.visitLabel(compiled);
 
             // k = p.k, openups, v = NONE, top = 0, pc = 0, hook state and call frame
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitFieldInsn(GETFIELD, LC, "p", "L" + PR + ";");
             mv.visitFieldInsn(GETFIELD, PR, "k", D_STACK);
             mv.visitVarInsn(ASTORE, K);
@@ -253,14 +268,14 @@ public final class LuaJit implements Opcodes {
             mv.visitVarInsn(ISTORE, PC);
             mv.visitInsn(ACONST_NULL);
             mv.visitVarInsn(ASTORE, TMP);
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitVarInsn(ALOAD, STACK);
             mv.visitVarInsn(ALOAD, VARARGS);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "enter", "(" + D_STACK + D_VA + ")" + D_ST, false);
+            mv.visitMethodInsn(INVOKESTATIC, CC, "enter", "(" + D_LC + D_STACK + D_VA + ")" + D_ST, false);
             mv.visitVarInsn(ASTORE, HOOK);
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitVarInsn(ALOAD, HOOK);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "frame", "(" + D_ST + ")" + D_CF, false);
+            mv.visitMethodInsn(INVOKESTATIC, CC, "frame", "(" + D_LC + D_ST + ")" + D_CF, false);
             mv.visitVarInsn(ASTORE, FRAME);
 
             Label start = new Label(), end = new Label(), handler = new Label();
@@ -276,10 +291,10 @@ public final class LuaJit implements Opcodes {
                 if (leader[pc]) {
                     int count = blockLength(pc);
                     if (count > 0) {
-                        mv.visitVarInsn(ALOAD, THIS);
+                        mv.visitVarInsn(ALOAD, CL);
                         mv.visitVarInsn(ALOAD, HOOK);
                         push(count);
-                        mv.visitMethodInsn(INVOKEVIRTUAL, CC, "count", "(" + D_ST + "I)V", false);
+                        mv.visitMethodInsn(INVOKESTATIC, CC, "count", "(" + D_LC + D_ST + "I)V", false);
                     }
                 }
                 instruction(pc);
@@ -293,12 +308,12 @@ public final class LuaJit implements Opcodes {
             // anything thrown: the interpreter's error handling, then the same exit
             mv.visitLabel(handler);
             mv.visitVarInsn(ASTORE, ERR);
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitVarInsn(ALOAD, ERR);
             mv.visitVarInsn(ILOAD, PC);
             mv.visitVarInsn(ALOAD, FRAME);
             mv.visitVarInsn(ALOAD, OPENUPS);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "fail", "(Ljava/lang/Throwable;I" + D_CF + D_UPS + ")Ljava/lang/Throwable;", false);
+            mv.visitMethodInsn(INVOKESTATIC, CC, "fail", "(" + D_LC + "Ljava/lang/Throwable;I" + D_CF + D_UPS + ")Ljava/lang/Throwable;", false);
             mv.visitInsn(ATHROW);
         }
 
@@ -540,11 +555,11 @@ public final class LuaJit implements Opcodes {
                 case Lua.OP_CLOSURE -> {
                     at(pc);
                     regStore(a);
-                    mv.visitVarInsn(ALOAD, THIS);
+                    mv.visitVarInsn(ALOAD, CL);
                     push(bx);
                     mv.visitVarInsn(ALOAD, STACK);
                     mv.visitVarInsn(ALOAD, OPENUPS);
-                    mv.visitMethodInsn(INVOKEVIRTUAL, CC, "closure", "(I" + D_STACK + D_UPS + ")L" + LC + ";", false);
+                    mv.visitMethodInsn(INVOKESTATIC, CC, "closure", "(" + D_LC + "I" + D_STACK + D_UPS + ")L" + LC + ";", false);
                     mv.visitInsn(AASTORE);
                 }
                 case Lua.OP_VARARG -> {
@@ -676,9 +691,9 @@ public final class LuaJit implements Opcodes {
         // the value on the operand stack is returned, after closing the upvalues and popping the call frame
         private void returnValue() {
             mv.visitVarInsn(ASTORE, RET);
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitVarInsn(ALOAD, OPENUPS);
-            mv.visitMethodInsn(INVOKEVIRTUAL, CC, "exit", "(" + D_UPS + ")V", false);
+            mv.visitMethodInsn(INVOKESTATIC, CC, "exit", "(" + D_LC + D_UPS + ")V", false);
             mv.visitVarInsn(ALOAD, RET);
             mv.visitInsn(ARETURN);
         }
@@ -723,7 +738,7 @@ public final class LuaJit implements Opcodes {
         }
 
         private void upvalueRef(int index) {
-            mv.visitVarInsn(ALOAD, THIS);
+            mv.visitVarInsn(ALOAD, CL);
             mv.visitFieldInsn(GETFIELD, LC, "upValues", D_UPS);
             push(index);
             mv.visitInsn(AALOAD);

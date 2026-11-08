@@ -113,8 +113,7 @@ public class LuaC extends Constants implements Globals.Compiler, Globals.Loader 
 
 	@Override
 	public LuaFunction load(Prototype prototype, String chunkname, LuaValue env) throws IOException {
-		// [bh] compiled when a compiler made a factory for it
-		return org.luaj.vm2.CompiledClosure.newClosure(prototype, env);
+		return new LuaClosure(prototype, env);
 	}
 
 	/**

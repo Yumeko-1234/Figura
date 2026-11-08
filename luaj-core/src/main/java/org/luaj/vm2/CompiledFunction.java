@@ -3,75 +3,72 @@ package org.luaj.vm2;
 import org.luaj.vm2.lib.DebugLib;
 
 /**
- * [bh] Base class of Lua functions compiled to JVM bytecode (Figura's LuaJit).
+ * [bh] A Lua function compiled to JVM bytecode (Figura's LuaJit): the code of one {@link Prototype}, shared by all its closures.
  * <p>
- * A compiled function is still a LuaClosure: the same prototype, upvalues, stack array and call frames as an interpreted one,
- * only its {@link #execute} is generated code doing what the interpreter does for each instruction, as straight-line bytecode.
- * So calls, varargs, metatables, coroutines, tracebacks and debug.getinfo behave the same, and compiled and interpreted
- * functions call each other freely.
+ * {@link LuaClosure#execute} runs it instead of the interpreter once it is set on {@link Prototype#compiled}, so closures
+ * made before it was compiled switch too. The generated {@link #execute} does what the interpreter does for each instruction,
+ * on the same stack array, upvalues and call frames, so calls, varargs, metatables, coroutines, tracebacks and debug.getinfo
+ * behave the same, and compiled and interpreted functions call each other freely.
  * <p>
- * The generated code counts instructions per block for the count hook ({@link DebugLib#onInstructions}) and keeps the
- * call frame's instruction up to date wherever a call or an error can happen. With a line, call or return hook set it runs
- * the interpreter instead ({@link #mustInterpret}).
+ * Instructions are counted per block for the count hook ({@link DebugLib#onInstructions}) and the call frame's instruction is
+ * kept up to date wherever a call or an error can happen. With a line, call or return hook set the interpreter runs instead.
+ * <p>
+ * Functions are compiled when they get hot: after {@link #threshold} calls the {@link #listener} is told, once per prototype.
  */
-public abstract class CompiledClosure extends LuaClosure {
+public abstract class CompiledFunction {
 
-	/** Makes the closures of a compiled prototype. */
-	public interface Factory {
-		LuaClosure create(Prototype p, LuaValue env);
+	/** Told about functions called {@link #threshold} times while interpreted. */
+	public interface HotListener {
+		void hot(Prototype p);
 	}
 
-	/** A closure for the prototype: compiled when a compiler made a factory for it, interpreted otherwise. */
-	public static LuaClosure newClosure(Prototype p, LuaValue env) {
-		Factory f = p.compiled;
-		if (f != null) {
-			try {
-				return f.create(p, env);
-			} catch (Throwable t) {
-				// never again for this prototype
-				p.compiled = null;
-			}
+	public static volatile HotListener listener;
+	/** calls before a function is hot, 0 = never */
+	public static volatile int threshold;
+
+	protected CompiledFunction() {}
+
+	/** Runs the function for the closure, like LuaClosure.execute. */
+	protected abstract Varargs execute(LuaClosure cl, LuaValue[] stack, Varargs varargs);
+
+	// called by LuaClosure.execute while interpreting
+	static void called(Prototype p) {
+		int t = threshold;
+		if (t > 0 && ++p.calls == t) {
+			HotListener l = listener;
+			if (l != null)
+				l.hot(p);
 		}
-		return new LuaClosure(p, env);
 	}
-
-	protected CompiledClosure(Prototype p, LuaValue env) {
-		super(p, env);
-	}
-
-	// -- entry and exit, the same as LuaClosure.execute -- //
 
 	/** Line, call and return hooks need the interpreter, which reports every instruction. */
-	protected final boolean mustInterpret() {
-		Globals g = globals;
+	static boolean mustInterpret(Globals g) {
 		if (g == null || g.debuglib == null)
 			return false;
 		LuaThread.State s = g.running.state;
 		return s.hookline || s.hookcall || s.hookrtrn;
 	}
 
-	protected final Varargs interpret(LuaValue[] stack, Varargs varargs) {
-		return super.execute(stack, varargs);
-	}
+	// -- entry and exit, the same as LuaClosure.execute -- //
 
 	/** Pushes the call frame, returns the running coroutine's hook state, null without the debug library. */
-	protected final LuaThread.State enter(LuaValue[] stack, Varargs varargs) {
-		Globals g = globals;
+	protected static LuaThread.State enter(LuaClosure cl, LuaValue[] stack, Varargs varargs) {
+		Globals g = cl.globals;
 		if (g == null || g.debuglib == null)
 			return null;
-		g.debuglib.onCall(this, varargs, stack);
+		g.debuglib.onCall(cl, varargs, stack);
 		return g.running.state;
 	}
 
 	/** The call frame pushed by {@link #enter}, null when none was. */
-	protected final DebugLib.CallFrame frame(LuaThread.State s) {
-		return s == null? null: globals.debuglib.topFrame(s);
+	protected static DebugLib.CallFrame frame(LuaClosure cl, LuaThread.State s) {
+		return s == null? null: cl.globals.debuglib.topFrame(s);
 	}
 
 	/** n instructions about to run, for the count hook. */
-	protected final void count(LuaThread.State s, int n) {
+	protected static void count(LuaClosure cl, LuaThread.State s, int n) {
 		if (s != null)
-			globals.debuglib.onInstructions(s, n);
+			cl.globals.debuglib.onInstructions(s, n);
 	}
 
 	/** The instruction running, for the traceback and error position, when a call or an error can happen. */
@@ -81,34 +78,35 @@ public abstract class CompiledClosure extends LuaClosure {
 	}
 
 	/** On every return: closes the upvalues still open and pops the call frame. */
-	protected final void exit(UpValue[] openups) {
+	protected static void exit(LuaClosure cl, UpValue[] openups) {
 		if (openups != null)
 			for (int u = openups.length; --u >= 0;)
 				if (openups[u] != null)
 					openups[u].close();
-		if (globals != null && globals.debuglib != null)
-			globals.debuglib.onReturn();
+		Globals g = cl.globals;
+		if (g != null && g.debuglib != null)
+			g.debuglib.onReturn();
 	}
 
 	/** On an exception: the same error handling as the interpreter, then {@link #exit}; returns what to throw. */
-	protected final Throwable fail(Throwable t, int pc, DebugLib.CallFrame frame, UpValue[] openups) {
+	protected static Throwable fail(LuaClosure cl, Throwable t, int pc, DebugLib.CallFrame frame, UpValue[] openups) {
 		try {
 			if (frame != null)
 				frame.pc(pc);
 			if (t instanceof LuaError) {
 				LuaError le = (LuaError) t;
 				if (le.traceback == null)
-					processErrorHooks(le, p, pc);
+					cl.processErrorHooks(le, cl.p, pc);
 				return le;
 			}
 			if (t instanceof Exception) {
 				LuaError le = new LuaError(t);
-				processErrorHooks(le, p, pc);
+				cl.processErrorHooks(le, cl.p, pc);
 				return le;
 			}
 			return t;
 		} finally {
-			exit(openups);
+			exit(cl, openups);
 		}
 	}
 
@@ -159,7 +157,7 @@ public abstract class CompiledClosure extends LuaClosure {
 
 	/** OP_TFORCALL */
 	protected static void tforcall(LuaValue[] stack, int a, int c) {
-		Varargs v = stack[a].invoke(varargsOf(stack[a+1], stack[a+2]));
+		Varargs v = stack[a].invoke(LuaValue.varargsOf(stack[a+1], stack[a+2]));
 		while (--c >= 0)
 			stack[a+3+c] = v.arg(c+1);
 	}
@@ -184,15 +182,15 @@ public abstract class CompiledClosure extends LuaClosure {
 	}
 
 	/** OP_CLOSURE */
-	protected final LuaClosure closure(int index, LuaValue[] stack, UpValue[] openups) {
-		Prototype newp = p.p[index];
-		LuaClosure ncl = newClosure(newp, globals);
+	protected static LuaClosure closure(LuaClosure cl, int index, LuaValue[] stack, UpValue[] openups) {
+		Prototype newp = cl.p.p[index];
+		LuaClosure ncl = new LuaClosure(newp, cl.globals);
 		Upvaldesc[] uv = newp.upvalues;
 		for (int j = 0, nup = uv.length; j < nup; ++j) {
 			if (uv[j].instack)
-				ncl.upValues[j] = findupval(stack, uv[j].idx, openups);
+				ncl.upValues[j] = cl.findupval(stack, uv[j].idx, openups);
 			else
-				ncl.upValues[j] = upValues[uv[j].idx];
+				ncl.upValues[j] = cl.upValues[uv[j].idx];
 		}
 		return ncl;
 	}
@@ -205,7 +203,7 @@ public abstract class CompiledClosure extends LuaClosure {
 
 	/** the arguments of OP_CALL / OP_TAILCALL beyond the fixed cases */
 	protected static Varargs args(LuaValue[] stack, int a, int b, int top, Varargs v) {
-		return b > 0? varargsOf(stack, a+1, b-1): varargsOf(stack, a+1, top-v.narg()-(a+1), v);
+		return b > 0? LuaValue.varargsOf(stack, a+1, b-1): LuaValue.varargsOf(stack, a+1, top-v.narg()-(a+1), v);
 	}
 
 	/** OP_CALL with C > 0: the results into R(a) ... R(a+n-1) */
@@ -215,7 +213,7 @@ public abstract class CompiledClosure extends LuaClosure {
 
 	/** OP_RETURN with B = 0 */
 	protected static Varargs returnAll(LuaValue[] stack, int a, int top, Varargs v) {
-		return varargsOf(stack, a, top-v.narg()-a, v);
+		return LuaValue.varargsOf(stack, a, top-v.narg()-a, v);
 	}
 
 	/** OP_LOADKX / unexpected words */

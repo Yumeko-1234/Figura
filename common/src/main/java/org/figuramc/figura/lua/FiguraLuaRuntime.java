@@ -77,16 +77,14 @@ public class FiguraLuaRuntime {
         userGlobals.load(new TableLib());
         userGlobals.load(new JseStringLib());
         userGlobals.load(new JseMathLib());
-
         LuaC.install(userGlobals);
+        // hot functions compiled to JVM bytecode, see LuaJit
+        org.figuramc.figura.lua.jit.LuaJit.configure(org.figuramc.figura.config.Configs.LUA_COMPILER.value);
         // script constants share the pooled key instances, see LuaStringInterner
         Globals.Compiler compiler = userGlobals.compiler;
         userGlobals.compiler = (stream, chunkName) -> {
             Prototype prototype = compiler.compile(stream, chunkName);
             LuaStringInterner.internConstants(prototype);
-            // compiled to JVM bytecode (phase 2: everything, only with -Dfigura.luaJit=true)
-            if (org.figuramc.figura.lua.jit.LuaJit.ENABLED)
-                org.figuramc.figura.lua.jit.LuaJit.compileAll(prototype);
             return prototype;
         };
 

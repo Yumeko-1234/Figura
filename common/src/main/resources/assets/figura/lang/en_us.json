@@ -449,6 +449,8 @@ Your own avatar, focused players and full detail avatars always run on the tick"
     "figura.config.cache_part_matrices.tooltip": "Model parts that did not move since the last frame reuse their transform instead of computing it again\nLooks exactly the same, only skips repeated math",
     "figura.config.share_shadow_pass_scripts": "Share Render Scripts With Shadows",
     "figura.config.share_shadow_pass_scripts.tooltip": "With a shader pack, avatars are drawn twice a frame (shadows, then the normal view)\nTheir render scripts run once, in the shadow pass, and the normal view reuses the result\nAvatars whose render events can read the pose matrix always run twice",
+    "figura.config.lua_compiler": "Compile Lua Scripts",
+    "figura.config.lua_compiler.tooltip": "Script functions that run often are compiled to Java bytecode in the background, running up to twice as fast\nThey behave the same as before, including the instruction limits\nTurning it off stops compiling more functions, the ones already compiled stay until the avatar reloads",
     "figura.config.body_lod_self": "Reduce My Avatar",
     "figura.config.body_lod_self.tooltip": "Also apply Body Detail Reduction and Simplify Avatar Bodies to your own avatar, except for the parts attached to the head\nOnly changes how it renders on your screen, the uploaded avatar stays untouched",
     "figura.config.body_lod.1": "Off",

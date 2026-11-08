@@ -226,6 +226,17 @@ public class LuaClosure extends LuaFunction {
 	}
 
 	protected Varargs execute(LuaValue[] stack, Varargs varargs) {
+		// [bh] compiled code when the function was compiled (and no line, call or return hook needs the interpreter)
+		CompiledFunction f = p.compiled;
+		if (f == null)
+			CompiledFunction.called(p);
+		else if (!CompiledFunction.mustInterpret(globals))
+			return f.execute(this, stack, varargs);
+		return interpret(stack, varargs);
+	}
+
+	// [bh] the interpreter, was execute
+	protected final Varargs interpret(LuaValue[] stack, Varargs varargs) {
 		// loop through instructions
 		int i, a, b, c, pc = 0, top = 0;
 		LuaValue o;
@@ -569,8 +580,7 @@ public class LuaClosure extends LuaFunction {
 				case Lua.OP_CLOSURE: /*	A Bx	R(A):= closure(KPROTO[Bx])	*/
 				{
 					Prototype newp = p.p[i>>>14];
-					// [bh] compiled when a compiler made a factory for it
-					LuaClosure ncl = CompiledClosure.newClosure(newp, globals);
+					LuaClosure ncl = new LuaClosure(newp, globals);
 					Upvaldesc[] uv = newp.upvalues;
 					for (int j = 0, nup = uv.length; j < nup; ++j) {
 						if (uv[j].instack) /* upvalue refes to local variable? */
@@ -640,7 +650,7 @@ public class LuaClosure extends LuaFunction {
 		}
 	}
 
-	// [bh] protected for CompiledClosure
+	// [bh] protected for CompiledFunction
 	protected final void processErrorHooks(LuaError le, Prototype p, int pc) {
 		String file = "?";
 		int line = -1;
@@ -663,7 +673,7 @@ public class LuaClosure extends LuaFunction {
 		le.traceback = errorHook(le.getMessage(), le.level);
 	}
 
-	// [bh] protected for CompiledClosure
+	// [bh] protected for CompiledFunction
 	protected final UpValue findupval(LuaValue[] stack, short idx, UpValue[] openups) {
 		final int n = openups.length;
 		for (int i = 0; i < n; ++i)
