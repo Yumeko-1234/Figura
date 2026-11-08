@@ -130,6 +130,8 @@ public abstract class LevelRendererMixin {
     private void afterRenderLevel(PoseStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
         AvatarManager.executeAll("postWorldRender", avatar -> avatar.postWorldRenderEvent(tickDelta));
         EpicFightPoseThrottle.endEntity();
+        if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+            org.figuramc.figura.benchmark.FiguraBenchmark.onLevelRendered();
     }
 
     @ModifyArg(method = "renderHitOutline", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;renderShape(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/phys/shapes/VoxelShape;DDDFFFF)V"), index = 6)

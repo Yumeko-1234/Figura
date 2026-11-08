@@ -32,7 +32,9 @@ public class AvatarAtlas extends AbstractTexture {
 
     // textures bigger than this stay on their own, they would waste most of the atlas around them
     private static final int MAX_PACKED_SIZE = 2048;
-    private static final int PADDING = 1;
+    // the margin around each region, filled like the texture's own repeat wrapping (the opposite edges), so uvs reaching up to
+    // this many pixels past the texture (common in models: faces a few pixels over the edge) still sample what they did
+    private static final int PADDING = 4;
 
     private final ResourceLocation location;
     private final int width, height;
@@ -45,6 +47,8 @@ public class AvatarAtlas extends AbstractTexture {
         public final int x, y, width, height;
         // uv 0 to 1 of the texture to uv in the atlas: u * scaleU + offsetU
         public final double scaleU, scaleV, offsetU, offsetV;
+        // how far (in texture uv, 0 to 1 = the texture) uvs may reach past the texture and still sample the same pixels
+        public final double marginU, marginV;
 
         Region(AvatarAtlas atlas, int x, int y, int width, int height) {
             this.atlas = atlas;
@@ -56,6 +60,8 @@ public class AvatarAtlas extends AbstractTexture {
             this.scaleV = (double) height / atlas.height;
             this.offsetU = (double) x / atlas.width;
             this.offsetV = (double) y / atlas.height;
+            this.marginU = (double) PADDING / width;
+            this.marginV = (double) PADDING / height;
         }
 
         // copies the image (already at the uploaded size) into the region and its border, on the render thread
@@ -68,15 +74,27 @@ public class AvatarAtlas extends AbstractTexture {
             atlas.bind();
             // level, x, y, skip pixels, skip rows, width, height, mipmap, close
             image.upload(0, x, y, 0, 0, w, h, false, false);
-            // border: edges then corners
-            image.upload(0, x - 1, y, 0, 0, 1, h, false, false);
-            image.upload(0, x + w, y, w - 1, 0, 1, h, false, false);
-            image.upload(0, x, y - 1, 0, 0, w, 1, false, false);
-            image.upload(0, x, y + h, 0, h - 1, w, 1, false, false);
-            image.upload(0, x - 1, y - 1, 0, 0, 1, 1, false, false);
-            image.upload(0, x + w, y - 1, w - 1, 0, 1, 1, false, false);
-            image.upload(0, x - 1, y + h, 0, h - 1, 1, 1, false, false);
-            image.upload(0, x + w, y + h, w - 1, h - 1, 1, 1, false, false);
+            // margin: what the texture's repeat wrapping samples there, the opposite edge (several times over for tiny textures)
+            int m = PADDING;
+            for (int k = 1; k <= m; k++) {
+                int left = Math.floorMod(-k, w), right = Math.floorMod(w - 1 + k, w);
+                int top = Math.floorMod(-k, h), bottom = Math.floorMod(h - 1 + k, h);
+                image.upload(0, x - k, y, left, 0, 1, h, false, false);
+                image.upload(0, x + w - 1 + k, y, right, 0, 1, h, false, false);
+                image.upload(0, x, y - k, 0, top, w, 1, false, false);
+                image.upload(0, x, y + h - 1 + k, 0, bottom, w, 1, false, false);
+            }
+            // corners, pixel by pixel
+            for (int i = 1; i <= m; i++) {
+                for (int j = 1; j <= m; j++) {
+                    int l = Math.floorMod(-i, w), r = Math.floorMod(w - 1 + i, w);
+                    int t = Math.floorMod(-j, h), b = Math.floorMod(h - 1 + j, h);
+                    image.upload(0, x - i, y - j, l, t, 1, 1, false, false);
+                    image.upload(0, x + w - 1 + i, y - j, r, t, 1, 1, false, false);
+                    image.upload(0, x - i, y + h - 1 + j, l, b, 1, 1, false, false);
+                    image.upload(0, x + w - 1 + i, y + h - 1 + j, r, b, 1, 1, false, false);
+                }
+            }
         }
     }
 

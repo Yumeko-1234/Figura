@@ -1019,7 +1019,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         };
     }
 
-    // blended: packed holds vertices blended this frame (ScriptTransformInterpolator), never atlased since their uvs may change
+    // blended: packed holds vertices blended this frame (ScriptTransformInterpolator), see uvsInsideTexture
     private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner, boolean blended) {
         int vertCount = Math.min(faceCount * 4, vertices.size());
         int w = textureSet.getWidth(), h = textureSet.getHeight();
@@ -1030,10 +1030,12 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         RenderType renderType;
         AvatarAtlas.Region region = null;
-        if (vertexData.region != null && !blended && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount)) {
+        if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount, blended, vertexData.region)) {
             region = vertexData.region;
             renderType = opaque && vertexData.atlasOpaqueRenderType != null ? vertexData.atlasOpaqueRenderType : vertexData.atlasRenderType;
         } else {
+            if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                org.figuramc.figura.benchmark.FiguraBenchmark.onStandalone(figuraTexture == null ? "notAvatarTexture" : vertexData.region == null ? (figuraTexture.getAtlasRegion() == null ? "notInAtlas" : "incompatibleType") : blended ? "blended" : owner != null && owner.verticesExposed() ? "scriptVertices" : "uvsOutside", vertCount);
             // drawn from the texture itself: make sure it is on the GPU on its own
             if (figuraTexture != null && figuraTexture.getAtlasRegion() != null)
                 figuraTexture.requestStandalone();
@@ -1051,12 +1053,26 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private static final Map<float[], float[]> UV_BOUNDS = new WeakHashMap<>();
 
     // if every uv of the batch, after the part's uv matrix, stays within the texture: then it can be drawn from an atlas region
-    // vertices scripts can reach are never atlased, a script may still change their uvs before the batch is written
-    private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount) {
+    // vertices scripts can reach are never atlased, a script may still change their uvs before the batch is written;
+    // blended vertices are (ScriptTransformInterpolator.blendVertices): their array is only rewritten by the next blend, after this
+    // pass wrote the batch, so its uvs are checked as they are now (not cached, they change from frame to frame)
+    private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount, boolean blended, AvatarAtlas.Region region) {
         if (packed == null || (owner != null && owner.verticesExposed()) || w <= 0 || h <= 0)
             return false;
-        float[] bounds = UV_BOUNDS.get(packed);
-        if (bounds == null) {
+        float[] bounds = blended ? null : UV_BOUNDS.get(packed);
+        if (blended) {
+            float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
+            int end = Math.min(packed.length, vertCount * FiguraModelPart.PACKED_STRIDE);
+            for (int o = 0; o < end; o += FiguraModelPart.PACKED_STRIDE) {
+                float u = packed[o + 3], v = packed[o + 4];
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            bounds = BLENDED_BOUNDS;
+            bounds[0] = minU; bounds[1] = minV; bounds[2] = maxU; bounds[3] = maxV;
+        } else if (bounds == null) {
             float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
             for (int o = 0; o < packed.length; o += FiguraModelPart.PACKED_STRIDE) {
                 float u = packed[o + 3], v = packed[o + 4];
@@ -1072,6 +1088,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return false;
 
         // same uv transform as Batch.set: pixels to 0..1, then the uv matrix; affine, so the corners bound it
+        // (up to the region's margin past the texture, where the atlas holds what the texture's repeat wrapping shows)
+        double mu = region.marginU + UV_EPSILON, mv = region.marginV + UV_EPSILON;
         FiguraMat3 t = customization.uvMatrix;
         double t11 = t.v11 / w, t12 = t.v12 / h, t13 = t.v13;
         double t21 = t.v21 / w, t22 = t.v22 / h, t23 = t.v23;
@@ -1079,13 +1097,19 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             double u = (corner & 1) == 0 ? bounds[0] : bounds[2];
             double v = (corner & 2) == 0 ? bounds[1] : bounds[3];
             double tu = t11 * u + t12 * v + t13, tv = t21 * u + t22 * v + t23;
-            if (tu < -UV_EPSILON || tu > 1 + UV_EPSILON || tv < -UV_EPSILON || tv > 1 + UV_EPSILON)
+            if (tu < -mu || tu > 1 + mu || tv < -mv || tv > 1 + mv)
+            {
+                if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                    org.figuramc.figura.benchmark.FiguraBenchmark.onUvsOutside(w, h, bounds, tu, tv, t.v11 != 1 || t.v22 != 1 || t.v13 != 0 || t.v23 != 0 || t.v12 != 0 || t.v21 != 0, owner == null ? "blended" : owner.name);
                 return false;
+            }
         }
         return true;
     }
 
     private static final double UV_EPSILON = 1e-4;
+    // scratch bounds of blended vertices (render thread only)
+    private static final float[] BLENDED_BOUNDS = new float[4];
 
     private static class VertexData {
         public RenderType renderType;
@@ -1348,6 +1372,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             HashMap<RenderType, List<Batch>> map = primary ? primaryBuffers : secondaryBuffers;
             for (Map.Entry<RenderType, List<Batch>> entry : map.entrySet()) {
                 RenderType renderType = entry.getKey();
+                if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                    org.figuramc.figura.benchmark.FiguraBenchmark.onRenderType(renderType);
                 VertexConsumer vertexConsumer = bufferSource.getBuffer(renderType);
                 List<Batch> batches = entry.getValue();
 

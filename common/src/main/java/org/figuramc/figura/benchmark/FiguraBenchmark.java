@@ -141,6 +141,88 @@ public final class FiguraBenchmark {
         }
     }
 
+
+    // -- draw batches: Figura's render types, and the entity draw calls of Oculus' batched entity rendering -- //
+
+    // render types Figura handed to the buffer source this frame (one getBuffer each), and the distinct ones
+    private static final java.util.Set<Object> frameTypes = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private static int frameTypeRequests;
+    private static long sumFiguraTypes, sumFiguraRequests, sumIrisDraws, sumIrisTypes, countedFrames;
+    private static java.lang.reflect.Method irisDraws, irisTypes, irisReset;
+    private static boolean irisLookedUp;
+
+    public static void onRenderType(Object renderType) {
+        frameTypes.add(renderType);
+        frameTypeRequests++;
+    }
+
+    // at the end of every level render (the entity batches are drawn by then)
+    public static void onLevelRendered() {
+        countBatches();
+    }
+
+    private static void countBatches() {
+        // Oculus adds the counters to RenderBuffers (DrawCallTrackingRenderBuffers), the batched buffer source only exists during the level render
+        Object source = Minecraft.getInstance().renderBuffers();
+        if (!irisLookedUp) {
+            irisLookedUp = true;
+            try {
+                irisDraws = source.getClass().getMethod("getDrawCalls");
+                irisTypes = source.getClass().getMethod("getRenderTypes");
+                irisReset = source.getClass().getMethod("resetDrawCounts");
+            } catch (ReflectiveOperationException e) {
+                log("no Oculus draw counters on " + source.getClass().getName() + ": " + e);
+            }
+            log("draw counters: " + irisDraws);
+        }
+        if (measuring) {
+            countedFrames++;
+            if (countedFrames == 100)
+                for (Object type : frameTypes)
+                    log("render type: " + type);
+            sumFiguraTypes += frameTypes.size();
+            sumFiguraRequests += frameTypeRequests;
+            if (irisDraws != null) {
+                try {
+                    sumIrisDraws += (int) irisDraws.invoke(source);
+                    sumIrisTypes += (int) irisTypes.invoke(source);
+                } catch (ReflectiveOperationException ignored) {}
+            }
+        }
+        frameTypes.clear();
+        frameTypeRequests = 0;
+        if (irisReset != null) {
+            try {
+                irisReset.invoke(source);
+            } catch (ReflectiveOperationException ignored) {}
+        }
+    }
+
+    // avatar batches drawn from their own texture instead of the avatar atlas, by reason: batches and vertices
+    private static final java.util.Map<String, long[]> STANDALONE = new java.util.TreeMap<>();
+
+    private static final java.util.Set<String> UVS_OUTSIDE_LOGGED = new java.util.HashSet<>();
+
+    public static void onUvsOutside(int w, int h, float[] bounds, double tu, double tv, boolean uvMatrix, String part) {
+        if (!measuring || !UVS_OUTSIDE_LOGGED.add(part) || UVS_OUTSIDE_LOGGED.size() > 40)
+            return;
+        log(String.format(Locale.ROOT, "uvs outside: part %s texture %dx%d uv px [%.2f %.2f .. %.2f %.2f] corner %.4f %.4f uvMatrix=%s",
+                part, w, h, bounds[0], bounds[1], bounds[2], bounds[3], tu, tv, uvMatrix));
+    }
+
+    public static void onStandalone(String reason, int vertices) {
+        if (!measuring)
+            return;
+        long[] c = STANDALONE.computeIfAbsent(reason, k -> new long[2]);
+        c[0]++;
+        c[1] += vertices;
+    }
+
+    private static String batchStats() {
+        double n = Math.max(countedFrames, 1);
+        return String.format(Locale.ROOT, " | figuraTypes=%.1f (getBuffer %.1f) irisDraws=%.1f irisTypes=%.1f per frame",
+                sumFiguraTypes / n, sumFiguraRequests / n, sumIrisDraws / n, sumIrisTypes / n);
+    }
     // every level frame (Avatar.beginLevelFrame)
     public static void onFrame(long nanos) {
         if (!measuring)
@@ -334,9 +416,13 @@ public final class FiguraBenchmark {
                         + " | lua=%.1fms/s (render %.1f, other %.1f) avatarDraw=%.3fms/frame",
                 LABEL, CROWD_MODE ? "crowd:" + Path.of(CROWD).getFileName() + "x" + crowdSize + (CROWD_AVATARS ? "" : "-noavatars") : AVATAR.isBlank() ? "none" : Path.of(AVATAR).getFileName(), HOST_AS_OTHER,
                 Configs.AVATAR_RENDER_SCRIPT_RATE.value, Configs.AVATAR_RENDER_SCRIPT_BUDGET.value,
-                n, avgFps, p50, p99, max, low1, luaMsPerSecond, luaRenderMsPerSecond, luaMsPerSecond - luaRenderMsPerSecond, drawMsPerFrame);
+                n, avgFps, p50, p99, max, low1, luaMsPerSecond, luaRenderMsPerSecond, luaMsPerSecond - luaRenderMsPerSecond, drawMsPerFrame)
+                + batchStats();
         log(line);
         log("render events: " + RENDER_EVENTS);
+        StringBuilder standalone = new StringBuilder();
+        STANDALONE.forEach((k, v) -> standalone.append(String.format(Locale.ROOT, " %s=%.1f batches %.0f vertices", k, v[0] / (double) Math.max(countedFrames, 1), v[1] / (double) Math.max(countedFrames, 1))));
+        log("not from the atlas, per frame:" + standalone);
         StringBuilder kinds = new StringBuilder();
         LUA_BY_KIND.forEach((k, v) -> kinds.append(String.format(Locale.ROOT, " %s=%.1fms/s x%d/s", k, v[0] / 1e6 / seconds, Math.round(v[1] / seconds))));
         log("lua by kind:" + kinds);
