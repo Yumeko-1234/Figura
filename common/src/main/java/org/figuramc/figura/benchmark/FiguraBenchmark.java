@@ -220,6 +220,16 @@ public final class FiguraBenchmark {
 
     private static long sentVertices;
 
+    private static long consumes, parallelConsumes;
+
+    public static void onConsume(boolean parallel) {
+        if (!measuring)
+            return;
+        consumes++;
+        if (parallel)
+            parallelConsumes++;
+    }
+
     public static void onSent(int vertices) {
         if (measuring)
             sentVertices += vertices;
@@ -256,7 +266,7 @@ public final class FiguraBenchmark {
     }
 
     // every Lua run (Avatar.run), render: render scripts (render events and part functions), else ticks and other events
-    public static void onLua(long nanos, boolean render, Object toRun) {
+    public static synchronized void onLua(long nanos, boolean render, Object toRun) {
         if (!measuring)
             return;
         luaNanos += nanos;
@@ -282,7 +292,7 @@ public final class FiguraBenchmark {
     // time per Lua function, keyed by where it is defined: event handlers (LuaEvent.call) and part render functions (Avatar.run)
     private static final java.util.Map<String, long[]> LUA_BY_FUNCTION = new java.util.HashMap<>();
 
-    public static void onHandler(org.luaj.vm2.LuaFunction function, long nanos) {
+    public static synchronized void onHandler(org.luaj.vm2.LuaFunction function, long nanos) {
         if (!measuring)
             return;
         long[] entry = LUA_BY_FUNCTION.computeIfAbsent("event " + where(function), k -> new long[2]);
@@ -363,6 +373,9 @@ public final class FiguraBenchmark {
         String rate = System.getProperty("figura.benchmark.rate");
         if (rate != null)
             Configs.AVATAR_RENDER_SCRIPT_RATE.value = Integer.parseInt(rate);
+        String parallelTicks = System.getProperty("figura.benchmark.parallelTicks");
+        if (parallelTicks != null)
+            Configs.PARALLEL_TICK_SCRIPTS.value = Boolean.parseBoolean(parallelTicks);
         String tickBudget = System.getProperty("figura.benchmark.tickBudget");
         if (tickBudget != null)
             Configs.AVATAR_TICK_SCRIPT_BUDGET.value = Float.parseFloat(tickBudget);
@@ -649,7 +662,7 @@ public final class FiguraBenchmark {
         StringBuilder standalone = new StringBuilder();
         STANDALONE.forEach((k, v) -> standalone.append(String.format(Locale.ROOT, " %s=%.1f batches %.0f vertices", k, v[0] / (double) Math.max(countedFrames, 1), v[1] / (double) Math.max(countedFrames, 1))));
         log("not from the atlas, per frame:" + standalone);
-        log(String.format(Locale.ROOT, "vertices sent: %.0f per frame, empty quads not sent: %.0f per frame", sentVertices / (double) Math.max(countedFrames, 1), strippedVertices / (double) Math.max(countedFrames, 1)));
+        log(String.format(Locale.ROOT, "vertices sent: %.0f per frame, empty quads not sent: %.0f per frame, passes written by workers: %d of %d", sentVertices / (double) Math.max(countedFrames, 1), strippedVertices / (double) Math.max(countedFrames, 1), parallelConsumes, consumes));
         StringBuilder kinds = new StringBuilder();
         LUA_BY_KIND.forEach((k, v) -> kinds.append(String.format(Locale.ROOT, " %s=%.1fms/s x%d/s", k, v[0] / 1e6 / seconds, Math.round(v[1] / seconds))));
         log("lua by kind:" + kinds);

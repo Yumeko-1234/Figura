@@ -195,6 +195,13 @@ public class AvatarCulling {
     // the budget never makes an avatar run its render scripts less often than this many times per second
     // (low, since a run is spread over several frames instead of landing on one, and parts are smoothed in between)
     private static final double MIN_RENDER_SCRIPT_RATE = 5;
+    // in a crowd, the avatars past the closest CROWD_CLOSE ones may go down to this rate (their parts stay smoothed in between)
+    private static final double MIN_CROWD_RENDER_SCRIPT_RATE = 2;
+    private static final int CROWD_CLOSE = 16;
+
+    private static double minRenderScriptRate(Avatar avatar) {
+        return avatar.crowdRank < CROWD_CLOSE ? MIN_RENDER_SCRIPT_RATE : MIN_CROWD_RENDER_SCRIPT_RATE;
+    }
     // estimated frames per second, for the budget when the scripts may run every frame
     private static long lastFrameNanos;
     private static double frameRate = 60;
@@ -246,7 +253,7 @@ public class AvatarCulling {
         for (Avatar avatar : THROTTLED) {
             double rate = maxRate;
             if (avatar.renderScriptCost > 0 && avatar.renderScriptCost * maxRate > cap)
-                rate = Math.max(Math.min(MIN_RENDER_SCRIPT_RATE, maxRate), cap / avatar.renderScriptCost);
+                rate = Math.max(Math.min(minRenderScriptRate(avatar), maxRate), cap / avatar.renderScriptCost);
 
             // every frame anyway: nothing to time or smooth
             if (rate >= frameRate * 0.98) {
@@ -421,6 +428,10 @@ public class AvatarCulling {
             CROWD.add(new CrowdEntry(avatar, player, player.distanceToSqr(camX, camY, camZ)));
         }
         CROWD.sort(Comparator.comparingDouble(CrowdEntry::distanceSqr));
+        for (Avatar avatar : AVATARS)
+            avatar.crowdRank = 0;
+        for (int i = 0; i < CROWD.size(); i++)
+            CROWD.get(i).avatar().crowdRank = i;
     }
 
     // only the closest rendered avatars keep full detail, every next group of the same size loses one detail step

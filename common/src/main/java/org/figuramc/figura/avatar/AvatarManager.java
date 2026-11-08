@@ -65,6 +65,31 @@ public class AvatarManager {
 
     // tick scripts waiting for a frame of this tick, in tick order
     private static final ArrayDeque<Avatar> DEFERRED_TICKS = new ArrayDeque<>();
+
+    // tick scripts run on the workers together (see runTicks), collected here first
+    private static final List<Avatar> TICK_NOW = new ArrayList<>();
+
+    // runs the tick scripts of the avatars: other players' side by side on the workers (Parallel Tick Scripts), the own one here
+    private static void runTicks(List<Avatar> avatars) {
+        if (avatars.isEmpty())
+            return;
+        if (avatars.size() == 1 || !Configs.PARALLEL_TICK_SCRIPTS.value || !org.figuramc.figura.utils.FiguraWorkers.available()) {
+            for (Avatar avatar : avatars) {
+                FiguraMod.pushProfiler(avatar);
+                avatar.tickScripts();
+                FiguraMod.popProfiler();
+            }
+            return;
+        }
+        FiguraMod.pushProfiler("parallelTicks");
+        org.figuramc.figura.utils.FiguraWorkers.run(avatars.size(), i -> avatars.get(i).tickScripts());
+        FiguraMod.popProfiler();
+        // side by side, a tick costs the frame about its time divided by how many ran at once: that is what the tick budget counts
+        int together = Math.min(avatars.size(), org.figuramc.figura.utils.FiguraWorkers.THREADS + 1);
+        for (Avatar avatar : avatars)
+            if (avatar.tickScriptNanos > 0)
+                avatar.tickScriptNanos /= together;
+    }
     // frames counted since the last tick, and how many there were between the last two ticks
     private static int framesSinceTick, framesPerTick;
 
@@ -98,14 +123,15 @@ public class AvatarManager {
     private static void runDeferred(int count) {
         FiguraMod.pushProfiler(FiguraMod.MOD_ID);
         FiguraMod.pushProfiler("deferredTicks");
+        TICK_NOW.clear();
         for (int i = 0; i < count; i++) {
             Avatar avatar = DEFERRED_TICKS.poll();
             if (avatar == null)
                 break;
-            FiguraMod.pushProfiler(avatar);
-            avatar.tickScripts();
-            FiguraMod.popProfiler();
+            TICK_NOW.add(avatar);
         }
+        runTicks(TICK_NOW);
+        TICK_NOW.clear();
         FiguraMod.popProfiler(2);
     }
 
@@ -159,10 +185,15 @@ public class AvatarManager {
             // the own avatar and the ones being watched keep running on the tick, so their reaction is never delayed
             if (spread && !avatar.isHost && !avatar.owner.equals(cameraId) && !AvatarCulling.isFocused(avatar.owner) && !AvatarCulling.isFullDetail(avatar.owner))
                 DEFERRED_TICKS.add(avatar);
+            else if (!avatar.isHost && !avatar.owner.equals(cameraId))
+                TICK_NOW.add(avatar);
             else
                 avatar.tickScripts();
             FiguraMod.popProfiler();
         }
+        // other players' avatars that tick now: side by side on the workers
+        runTicks(TICK_NOW);
+        TICK_NOW.clear();
 
         // CEM
         if (LOADED_CEM.isEmpty())

@@ -377,6 +377,13 @@ public class FiguraLuaPrinter {
      * @throws org.luaj.vm2.LuaError if the message could not fit in the queue
      */
     private static void sendLuaChatMessage(Component message) throws LuaError {
+        // tick scripts of other avatars may print from Figura's worker threads
+        synchronized (org.figuramc.figura.utils.FiguraWorkers.LOCK) {
+            queueChat(message);
+        }
+    }
+
+    private static void queueChat(Component message) throws LuaError {
         charsQueued += message.getString().length();
         if (charsQueued > MAX_CHARS_QUEUED) {
             chatQueue.clear();

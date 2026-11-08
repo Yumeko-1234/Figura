@@ -167,6 +167,7 @@ public class Configs {
             GECKOLIB_ITEM_CACHE = new ConfigType.BoolConfig("geckolib_item_cache", RENDERING, true),
             REPLAY_CROWD_AVATARS = new ConfigType.BoolConfig("replay_crowd_avatars", RENDERING, false),
             SPREAD_TICK_SCRIPTS = new ConfigType.BoolConfig("spread_tick_scripts", RENDERING, true),
+            PARALLEL_TICK_SCRIPTS = new ConfigType.BoolConfig("parallel_tick_scripts", RENDERING, true),
             AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
             SIMPLIFY_AVATAR_BODIES = new ConfigType.BoolConfig("simplify_avatar_bodies", RENDERING, false),
             CACHE_PART_MATRICES = new ConfigType.BoolConfig("cache_part_matrices", RENDERING, true),

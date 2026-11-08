@@ -142,6 +142,8 @@ public class Avatar {
     public boolean focusBlocked, culled;
     // detail level for the avatar on its player, 0 is full detail, higher the further away it is
     public int lodLevel;
+    // place among the visible players by distance to the camera (0: closest), see AvatarCulling
+    public int crowdRank;
     // set every frame by AvatarCulling: the render scripts (render events and part render functions) are skipped this frame
     public boolean renderScriptsSkipped;
     // render script timing, used by AvatarCulling to throttle the expensive avatars more

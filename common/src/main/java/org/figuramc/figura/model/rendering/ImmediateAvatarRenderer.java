@@ -32,6 +32,7 @@ import org.figuramc.figura.model.rendering.texture.FiguraTextureSet;
 import org.figuramc.figura.model.rendering.texture.RenderTypes;
 import org.figuramc.figura.model.rendertasks.RenderTask;
 import org.figuramc.figura.utils.ColorUtils;
+import org.figuramc.figura.utils.FiguraWorkers;
 import org.figuramc.figura.utils.ui.UIHelper;
 
 import java.util.*;
@@ -1090,7 +1091,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount, boolean blended, AvatarAtlas.Region region) {
         if (packed == null || (owner != null && owner.verticesExposed()) || w <= 0 || h <= 0)
             return false;
-        float[] bounds = blended ? null : UV_BOUNDS.get(packed);
+        float[] bounds = blended ? null : owner != null ? owner.uvBounds(packed) : UV_BOUNDS.get(packed);
         if (blended) {
             float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
             int end = Math.min(packed.length, vertCount * FiguraModelPart.PACKED_STRIDE);
@@ -1262,6 +1263,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             n31 = b31; n32 = b32; n33 = b33;
         }
 
+        // how many vertices write() writes: the packed ones, or the vertex objects when a script got hold of them
+        int writeCount() {
+            return source() != null ? vertCount : Math.min(objectCount, vertices == null ? 0 : vertices.size());
+        }
+
         // the packed array to read this batch from, null when the vertex objects have to be read
         // (a script may have got hold of them since the batch was set, then only the objects are up to date)
         private float[] source() {
@@ -1406,6 +1412,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // keep: the frame cache the batches are kept in for a replay instead of being freed, or null
         public void consume(boolean primary, MultiBufferSource bufferSource, FrameCache keep) {
             HashMap<RenderType, List<Batch>> map = primary ? primaryBuffers : secondaryBuffers;
+            // every render type of the pass written by the workers at once, then handed to the buffer one after the other below
+            boolean prepared = prepareParallel(map, bufferSource);
+            if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
+                org.figuramc.figura.benchmark.FiguraBenchmark.onConsume(prepared);
+            int index = 0;
             for (Map.Entry<RenderType, List<Batch>> entry : map.entrySet()) {
                 RenderType renderType = entry.getKey();
                 if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
@@ -1419,8 +1430,12 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 // one bulk writer for the whole render type, so it is pushed in full chunks instead of once per part
                 SodiumCompat.BulkWriter bulk = SodiumCompat.writerFor(vertexConsumer, renderType);
                 if (bulk != null) {
-                    for (Batch batch : batches)
-                        batch.write(bulk);
+                    if (prepared && typeCounts[index] >= 0 && bulk.getClass() == preparedTarget.getClass()) {
+                        ((SodiumCompat.ParallelTarget) bulk).pushRaw(staging + (long) typeStarts[index] * preparedStride, typeCounts[index]);
+                    } else {
+                        for (Batch batch : batches)
+                            batch.write(bulk);
+                    }
                     bulk.flush();
                 } else {
                     for (Batch batch : batches)
@@ -1431,8 +1446,112 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                     keep.retain(renderType, batches);
                 else
                     free(batches);
+                index++;
             }
+            preparedTarget = null;
             map.clear();
+        }
+
+        // -- vertices written by worker threads -- //
+
+        // render types with at least this many vertices are written by the workers
+        private static final int PARALLEL_MIN_VERTICES = Integer.getInteger("figura.parallelVertices", 1024);
+        // the vertices one worker task writes at least
+        private static final int VERTICES_PER_TASK = 1024;
+
+        // where the workers write, grown when needed, render thread only
+        private static long staging;
+        private static long stagingSize;
+        private static int[] offsets = new int[64];
+
+        // filled by prepareParallel for consume: per render type (in map order) the first vertex in staging and the count,
+        // -1 for the ones left to the render thread
+        private static int[] typeStarts = new int[16], typeCounts = new int[16];
+        private static SodiumCompat.ParallelTarget preparedTarget;
+        private static int preparedStride;
+        private static final List<Batch> FLAT = new ArrayList<>();
+
+        // writes the batches of all render types of the pass on the workers into staging; false (nothing written) when there are
+        // too few vertices, no workers, or the buffer can't take vertices from memory
+        private static boolean prepareParallel(HashMap<RenderType, List<Batch>> map, MultiBufferSource bufferSource) {
+            if (PARALLEL_MIN_VERTICES <= 0 || !FiguraWorkers.available() || map.isEmpty())
+                return false;
+
+            // the writer of the first render type tells the vertex format (all of the pass use the entity format, see writerFor)
+            Map.Entry<RenderType, List<Batch>> first = map.entrySet().iterator().next();
+            if (first.getKey().format() != com.mojang.blaze3d.vertex.DefaultVertexFormat.NEW_ENTITY)
+                return false;
+            SodiumCompat.BulkWriter firstWriter = SodiumCompat.writerFor(bufferSource.getBuffer(first.getKey()), first.getKey());
+            if (!(firstWriter instanceof SodiumCompat.ParallelTarget target))
+                return false;
+
+            int types = map.size();
+            if (typeStarts.length < types) {
+                typeStarts = new int[Math.max(types, typeStarts.length * 2)];
+                typeCounts = new int[typeStarts.length];
+            }
+            FLAT.clear();
+            int total = 0, t = 0;
+            for (Map.Entry<RenderType, List<Batch>> entry : map.entrySet()) {
+                if (entry.getKey().format() != com.mojang.blaze3d.vertex.DefaultVertexFormat.NEW_ENTITY) {
+                    typeCounts[t++] = -1;
+                    continue;
+                }
+                typeStarts[t] = total;
+                for (Batch batch : entry.getValue()) {
+                    FLAT.add(batch);
+                    total += batch.writeCount();
+                }
+                typeCounts[t] = total - typeStarts[t];
+                t++;
+            }
+            if (total < PARALLEL_MIN_VERTICES)
+                return false;
+
+            int stride = target.stride();
+            long bytes = (long) total * stride;
+            if (bytes > stagingSize) {
+                long size = Math.max(bytes, stagingSize * 2);
+                long grown = staging == 0 ? org.lwjgl.system.MemoryUtil.nmemAlloc(size) : org.lwjgl.system.MemoryUtil.nmemRealloc(staging, size);
+                if (grown == 0)
+                    return false;
+                staging = grown;
+                stagingSize = size;
+            }
+
+            // consecutive batches per task, about the same number of vertices each
+            int n = FLAT.size();
+            if (offsets.length < n + 1)
+                offsets = new int[Math.max(n + 1, offsets.length * 2)];
+            int at = 0;
+            for (int i = 0; i < n; i++) {
+                offsets[i] = at;
+                at += FLAT.get(i).writeCount();
+            }
+            int tasks = Math.max(1, Math.min(FiguraWorkers.THREADS + 1, total / VERTICES_PER_TASK));
+            int[] firstBatch = new int[tasks + 1];
+            for (int k = 0, b = 0; k < tasks; k++) {
+                long until = (long) total * (k + 1) / tasks;
+                firstBatch[k] = b;
+                while (b < n && offsets[b] < until)
+                    b++;
+            }
+            firstBatch[tasks] = n;
+            long base = staging;
+            int[] off = offsets;
+            List<Batch> flat = FLAT;
+            FiguraWorkers.run(tasks, k -> {
+                int from = firstBatch[k], to = firstBatch[k + 1];
+                if (from >= to)
+                    return;
+                SodiumCompat.BulkWriter raw = target.rawWriter(base + (long) off[from] * stride);
+                for (int i = from; i < to; i++)
+                    flat.get(i).write(raw);
+            });
+            FLAT.clear();
+            preparedTarget = target;
+            preparedStride = stride;
+            return true;
         }
 
         // returns the batches and their list to the pools

@@ -1,6 +1,7 @@
 package org.figuramc.figura.lua;
 
 import net.minecraft.network.chat.Component;
+import org.figuramc.figura.utils.FiguraWorkers;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.lua.docs.FiguraDocsManager;
 import org.figuramc.figura.lua.docs.LuaTypeDoc;
@@ -202,6 +203,18 @@ public class LuaTypeManager {
 
     private static boolean argMismatchLogged;
 
+    // types whose methods only work on their own object (and the avatar it belongs to) or compute a value: worker threads
+    // running different avatars' tick scripts call them side by side, everything else runs under FiguraWorkers.LOCK
+    private static boolean threadSafe(Class<?> clazz) {
+        String name = clazz.getName();
+        return name.startsWith("org.figuramc.figura.math.")
+                || name.equals("org.figuramc.figura.lua.api.math.VectorsAPI")
+                || name.equals("org.figuramc.figura.lua.api.math.MatricesAPI")
+                || name.equals("org.figuramc.figura.model.FiguraModelPart")
+                || name.equals("org.figuramc.figura.model.rendering.Vertex")
+                || name.equals("org.figuramc.figura.animation.Animation");
+    }
+
     public VarArgFunction getWrapper(Method method) {
         // a public method of a public class passes the access check anyway, so it is skipped on every call
         if (Modifier.isPublic(method.getModifiers()) && Modifier.isPublic(method.getDeclaringClass().getModifiers())) {
@@ -224,9 +237,20 @@ public class LuaTypeManager {
             private final Object[] missingArgs = Arrays.stream(argumentTypes).map(LuaTypeManager::missingArg).toArray();
             // a direct call instead of reflection, null when the method keeps using reflection
             private LuaDirectInvokers.Invoker direct = LuaDirectInvokers.get(method);
+            // run under Figura's worker lock when called from a worker thread (see AvatarManager's parallel tick scripts)
+            private final boolean locked = !threadSafe(clazz) || (clazz.getName().equals("org.figuramc.figura.model.FiguraModelPart") && method.getName().startsWith("new"));
 
             @Override
             public Varargs invoke(Varargs args) {
+                if (locked && FiguraWorkers.isWorker()) {
+                    synchronized (FiguraWorkers.LOCK) {
+                        return call(args);
+                    }
+                }
+                return call(args);
+            }
+
+            private Varargs call(Varargs args) {
 
                 if (!isStatic) {
                     try {

@@ -420,7 +420,10 @@ public class FiguraLuaRuntime {
     // error ^-^ //
 
     public void error(Throwable e) {
-        FiguraLuaPrinter.sendLuaError(parseError(e), owner);
+        // also from Figura's worker threads (parallel tick scripts): the chat is shared
+        synchronized (org.figuramc.figura.utils.FiguraWorkers.LOCK) {
+            FiguraLuaPrinter.sendLuaError(parseError(e), owner);
+        }
         owner.scriptError = true;
         owner.luaRuntime = null;
         owner.clearParticles();

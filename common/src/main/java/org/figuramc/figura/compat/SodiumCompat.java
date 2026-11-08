@@ -90,12 +90,25 @@ public class SodiumCompat {
         void flush();
     }
 
+    // a bulk writer whose vertices can also be written straight to memory by worker threads (ImmediateAvatarRenderer.VertexBuffer):
+    // each worker writes whole quads from its own address on, then the render thread hands all of them to the buffer at once
+    public interface ParallelTarget {
+        // bytes per vertex
+        int stride();
+
+        // writes vertices one after the other from address on, from any thread
+        BulkWriter rawWriter(long address);
+
+        // hands the vertices written from address on to the buffer, on the render thread
+        void pushRaw(long address, int vertices);
+    }
+
     // writes the Iris extended entity format (IrisVertexFormats.ENTITY) the way Iris' ModelToEntityVertexSerializer converts to it:
     // the entity format first (the extended format starts with the same 36 bytes), then per quad the rendered entity ids,
     // the mid texture coordinate (the average of the 4 uvs) and the tangent (NormalHelper.computeTangent of the first normal and 3 corners)
     // The buffer then takes the vertices as they are, instead of reading back and converting every one.
     // separate class so the Iris classes are only loaded when Iris is present
-    private static class IrisEntityWriter implements BulkWriter {
+    private static class IrisEntityWriter implements BulkWriter, ParallelTarget {
         private static final int BATCH = 256;
         private static final int MODEL_STRIDE = net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.STRIDE;
 
@@ -188,12 +201,13 @@ public class SodiumCompat {
             if (corner == 0)
                 firstNormal = normal;
             else if (corner == 3)
-                endQuad(ptr - 3L * STRIDE);
+                endQuad(ptr - 3L * STRIDE, firstNormal, qx, qy, qz, qu, qv, entity, blockEntity, item);
             if (++count == BATCH)
                 flush();
         }
 
-        private void endQuad(long quad) {
+        // the per quad attributes of the 4 vertices written from quad on
+        static void endQuad(long quad, int firstNormal, float[] qx, float[] qy, float[] qz, float[] qu, float[] qv, short entity, short blockEntity, short item) {
             int tangent = net.irisshaders.iris.vertices.NormalHelper.computeTangent(
                     net.caffeinemc.mods.sodium.api.util.NormI8.unpackX(firstNormal),
                     net.caffeinemc.mods.sodium.api.util.NormI8.unpackY(firstNormal),
@@ -225,10 +239,58 @@ public class SodiumCompat {
             }
             count = 0;
         }
+
+        @Override
+        public int stride() {
+            return STRIDE;
+        }
+
+        @Override
+        public BulkWriter rawWriter(long address) {
+            return new Raw(address, entity, blockEntity, item);
+        }
+
+        @Override
+        public void pushRaw(long address, int vertices) {
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                writer.push(stack, address, vertices, DESCRIPTION);
+            }
+        }
+
+        // the same vertices written to memory one after the other, from any thread
+        private static final class Raw implements BulkWriter {
+            private final long base;
+            private final short entity, blockEntity, item;
+            private final float[] qx = new float[4], qy = new float[4], qz = new float[4], qu = new float[4], qv = new float[4];
+            private int count, firstNormal;
+
+            Raw(long base, short entity, short blockEntity, short item) {
+                this.base = base;
+                this.entity = entity;
+                this.blockEntity = blockEntity;
+                this.item = item;
+            }
+
+            @Override
+            public void vertex(float x, float y, float z, int color, float u, float v, int overlay, int light, int normal) {
+                long ptr = base + (long) count * STRIDE;
+                net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.write(ptr, x, y, z, color, u, v, overlay, light, normal);
+                int corner = count & 3;
+                qx[corner] = x; qy[corner] = y; qz[corner] = z; qu[corner] = u; qv[corner] = v;
+                if (corner == 0)
+                    firstNormal = normal;
+                else if (corner == 3)
+                    endQuad(ptr - 3L * STRIDE, firstNormal, qx, qy, qz, qu, qv, entity, blockEntity, item);
+                count++;
+            }
+
+            @Override
+            public void flush() {}
+        }
     }
 
     // separate class so the Sodium classes are only loaded when the api is present
-    private static class SodiumWriter implements BulkWriter {
+    private static class SodiumWriter implements BulkWriter, ParallelTarget {
         // whole quads only: shader packs compute their extra vertex attributes per quad
         private static final int BATCH = 256;
         private static final SodiumWriter INSTANCE = new SodiumWriter();
@@ -263,6 +325,34 @@ public class SodiumCompat {
                 writer.push(stack, buffer, count, net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.FORMAT);
             }
             count = 0;
+        }
+
+        @Override
+        public int stride() {
+            return net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.STRIDE;
+        }
+
+        @Override
+        public BulkWriter rawWriter(long address) {
+            return new BulkWriter() {
+                private long ptr = address;
+
+                @Override
+                public void vertex(float x, float y, float z, int color, float u, float v, int overlay, int light, int normal) {
+                    net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.write(ptr, x, y, z, color, u, v, overlay, light, normal);
+                    ptr += net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.STRIDE;
+                }
+
+                @Override
+                public void flush() {}
+            };
+        }
+
+        @Override
+        public void pushRaw(long address, int vertices) {
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                writer.push(stack, address, vertices, net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.FORMAT);
+            }
         }
     }
 }

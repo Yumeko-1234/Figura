@@ -177,37 +177,42 @@ public class FiguraMod {
 
     // -- profiler -- //
 
+    // the vanilla profiler, or the inactive one on Figura's worker threads (the profiler is not thread safe)
+    private static ProfilerFiller profiler() {
+        return org.figuramc.figura.utils.FiguraWorkers.isWorker() ? InactiveProfiler.INSTANCE : Minecraft.getInstance().getProfiler();
+    }
+
     public static void pushProfiler(String name) {
-        Minecraft.getInstance().getProfiler().push(name);
+        profiler().push(name);
     }
 
     // whether the vanilla profiler records anything (debug pie chart or a metrics recording), so labels are only built when they are used
     public static boolean isProfilerActive() {
-        return Minecraft.getInstance().getProfiler() != InactiveProfiler.INSTANCE;
+        return profiler() != InactiveProfiler.INSTANCE;
     }
 
     public static void pushProfiler(Avatar avatar) {
         // pushing to the inactive profiler does nothing, and the pops are no-ops too, so skipping it keeps them balanced
-        ProfilerFiller profiler = Minecraft.getInstance().getProfiler();
+        ProfilerFiller profiler = profiler();
         if (profiler != InactiveProfiler.INSTANCE)
             profiler.push(avatar.entityName.isBlank() ? avatar.owner.toString() : avatar.entityName);
     }
 
     public static void popPushProfiler(String name) {
-        Minecraft.getInstance().getProfiler().popPush(name);
+        profiler().popPush(name);
     }
 
     public static void popProfiler() {
-        Minecraft.getInstance().getProfiler().pop();
+        profiler().pop();
     }
 
     public static <T> T popReturnProfiler(T var) {
-        Minecraft.getInstance().getProfiler().pop();
+        profiler().pop();
         return var;
     }
 
     public static void popProfiler(int times) {
-        var profiler = Minecraft.getInstance().getProfiler();
+        var profiler = profiler();
         for (int i = 0; i < times; i++)
             profiler.pop();
     }

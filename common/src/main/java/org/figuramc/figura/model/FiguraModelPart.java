@@ -138,6 +138,32 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         return packed;
     }
 
+    // -- uv bounds of packed arrays, see ImmediateAvatarRenderer.uvsInsideTexture -- //
+
+    // the last few packed arrays drawn from this part and their uv bounds (min u, min v, max u, max v, in texture pixels)
+    private final float[][] uvBoundsKeys = new float[4][], uvBoundsValues = new float[4][];
+    private int uvBoundsNext;
+
+    public float[] uvBounds(float[] packed) {
+        for (int i = 0; i < uvBoundsKeys.length; i++)
+            if (uvBoundsKeys[i] == packed)
+                return uvBoundsValues[i];
+        float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
+        for (int o = 0; o < packed.length; o += PACKED_STRIDE) {
+            float u = packed[o + 3], v = packed[o + 4];
+            if (u < minU) minU = u;
+            if (u > maxU) maxU = u;
+            if (v < minV) minV = v;
+            if (v > maxV) maxV = v;
+        }
+        float[] bounds = {minU, minV, maxU, maxV};
+        int slot = uvBoundsNext;
+        uvBoundsNext = (slot + 1) & 3;
+        uvBoundsKeys[slot] = packed;
+        uvBoundsValues[slot] = bounds;
+        return bounds;
+    }
+
     // -- quads that draw nothing: not sent at all -- //
 
     // packed arrays with the quads that show nothing with a texture left out, by source array, texture and mode
