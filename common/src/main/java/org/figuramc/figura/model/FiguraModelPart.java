@@ -129,7 +129,8 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             return null;
         float[] packed = packedVertices[i];
         if (packed == null) {
-            List<Vertex> list = vertices.get(i);
+            List<Vertex>[] lists = vertexLists();
+            List<Vertex> list = i < lists.length ? lists[i] : null;
             if (list == null)
                 return null;
             packedVertices[i] = packed = pack(list);
@@ -217,6 +218,9 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
                 return false;
             // complexity always counts the full detail faces, so a distant avatar never shows more than a close one
             int faces = facesByTexture.get(i);
+            // most parts only use a few of the avatar's textures
+            if (faces == 0)
+                continue;
             remainingComplexity[0] -= faces;
             // (a detail level may share the vertex objects of the part, so its packed copy is dropped with them)
             if (lod != null && remainingComplexity[0] >= 0 && i < lod.facesByTexture.size()) {
