@@ -520,6 +520,26 @@ public class DebugLib extends TwoArgFunction {
 		}
 	}
 
+	// [bh] compiled code (CompiledClosure): n instructions at once, the same count hook and instruction counter as onInstruction.
+	// The hook fires when the count passes a multiple of the hook count anywhere in the block, so at most n-1 instructions early.
+	public void onInstructions(LuaThread.State s, int n) {
+		if (s.inhook || s.hookfunc == null || s.hookcount <= 0)
+			return;
+		int before = s.bytecodes;
+		s.bytecodes = before + n;
+		// once per multiple of the count crossed, as many times as the interpreter would have called it
+		for (int crossed = s.bytecodes / s.hookcount - before / s.hookcount; crossed > 0 && s.hookfunc != null && s.hookcount > 0; crossed--)
+			callHook(s, COUNT, NIL);
+	}
+
+	// [bh] the frame onCall pushed for the running closure, null when none was pushed (inside a hook)
+	public CallFrame topFrame(LuaThread.State s) {
+		if (s.inhook)
+			return null;
+		CallStack cs = callstack();
+		return cs.calls > 0? cs.frame[cs.calls - 1]: null;
+	}
+
 	// [bh] the call stack of the running coroutine, see onInstruction(State, CallStack, int, Varargs, int)
 	public CallStack runningCallStack() {
 		return callstack();
@@ -763,6 +783,11 @@ public class DebugLib extends TwoArgFunction {
 			this.f = function;
 			this.v = varargs;
 			this.stack = stack;
+		}
+
+		// [bh] compiled code keeps the frame's instruction up to date only where a call or an error can happen
+		public void pc(int pc) {
+			this.pc = pc;
 		}
 
 		public String shortsource() {

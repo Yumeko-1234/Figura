@@ -84,6 +84,9 @@ public class FiguraLuaRuntime {
         userGlobals.compiler = (stream, chunkName) -> {
             Prototype prototype = compiler.compile(stream, chunkName);
             LuaStringInterner.internConstants(prototype);
+            // compiled to JVM bytecode (phase 2: everything, only with -Dfigura.luaJit=true)
+            if (org.figuramc.figura.lua.jit.LuaJit.ENABLED)
+                org.figuramc.figura.lua.jit.LuaJit.compileAll(prototype);
             return prototype;
         };
 

@@ -569,7 +569,8 @@ public class LuaClosure extends LuaFunction {
 				case Lua.OP_CLOSURE: /*	A Bx	R(A):= closure(KPROTO[Bx])	*/
 				{
 					Prototype newp = p.p[i>>>14];
-					LuaClosure ncl = new LuaClosure(newp, globals);
+					// [bh] compiled when a compiler made a factory for it
+					LuaClosure ncl = CompiledClosure.newClosure(newp, globals);
 					Upvaldesc[] uv = newp.upvalues;
 					for (int j = 0, nup = uv.length; j < nup; ++j) {
 						if (uv[j].instack) /* upvalue refes to local variable? */
@@ -639,7 +640,8 @@ public class LuaClosure extends LuaFunction {
 		}
 	}
 
-	private void processErrorHooks(LuaError le, Prototype p, int pc) {
+	// [bh] protected for CompiledClosure
+	protected final void processErrorHooks(LuaError le, Prototype p, int pc) {
 		String file = "?";
 		int line = -1;
 		{
@@ -661,7 +663,8 @@ public class LuaClosure extends LuaFunction {
 		le.traceback = errorHook(le.getMessage(), le.level);
 	}
 
-	private UpValue findupval(LuaValue[] stack, short idx, UpValue[] openups) {
+	// [bh] protected for CompiledClosure
+	protected final UpValue findupval(LuaValue[] stack, short idx, UpValue[] openups) {
 		final int n = openups.length;
 		for (int i = 0; i < n; ++i)
 			if (openups[i] != null && openups[i].index == idx)

@@ -120,6 +120,8 @@ public class Prototype {
 	public int[]      code;
 	/* functions defined inside the function */
 	public Prototype[] p;
+	/* [bh] makes the closures of this function from compiled code (see CompiledClosure), null to interpret it */
+	public volatile CompiledClosure.Factory compiled;
 	/* map from opcodes to source lines */
 	public int[] lineinfo;
 	/* information about local variables */
