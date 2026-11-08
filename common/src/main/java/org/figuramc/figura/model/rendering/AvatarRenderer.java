@@ -18,6 +18,8 @@ import org.figuramc.figura.math.matrix.FiguraMat4;
 import org.figuramc.figura.model.FiguraModelPart;
 import org.figuramc.figura.model.ParentType;
 import org.figuramc.figura.model.VanillaModelData;
+import org.figuramc.figura.FiguraMod;
+import org.figuramc.figura.model.rendering.texture.AvatarAtlas;
 import org.figuramc.figura.model.rendering.texture.FiguraTexture;
 import org.figuramc.figura.model.rendering.texture.FiguraTextureSet;
 import org.joml.Matrix3f;
@@ -147,7 +149,38 @@ public abstract class AvatarRenderer {
     public abstract int renderSpecialParts();
     public abstract void updateMatrices();
 
+    // -- texture atlas -- //
+    // all the avatar's textures in one GPU texture, built on the first render (see AvatarAtlas), null when nothing was packed
+    protected AvatarAtlas atlas;
+    private boolean atlasBuilt;
+
+    // builds the atlas once, before the first upload of the textures; on the render thread
+    protected void prepareAtlas() {
+        if (atlasBuilt || !AvatarAtlas.ENABLED || textureSets.isEmpty())
+            return;
+        atlasBuilt = true;
+        try {
+            atlas = AvatarAtlas.build(avatar.owner, textureSets);
+        } catch (Exception e) {
+            FiguraMod.LOGGER.error("Failed to build the texture atlas of " + avatar.owner + ", drawing its textures separately", e);
+            atlas = null;
+        }
+    }
+
+    // the atlas a texture of this avatar is drawn from, null when it is drawn on its own
+    public AvatarAtlas.Region atlasRegion(FiguraTexture texture) {
+        AvatarAtlas.Region region = texture == null ? null : texture.getAtlasRegion();
+        return region != null && region.atlas == atlas && !atlas.isClosed() ? region : null;
+    }
+
     public void markTexturesDirty() {
+        // the sizes on the GPU may change, the atlas is packed again on the next render
+        if (atlas != null) {
+            atlas.close();
+            atlas = null;
+        }
+        atlasBuilt = false;
+
         for (FiguraTextureSet set : textureSets) {
             for (FiguraTexture texture : set.textures) {
                 if (texture != null)
@@ -159,6 +192,12 @@ public abstract class AvatarRenderer {
     }
 
     protected void clean() {
+        if (atlas != null) {
+            atlas.close();
+            atlas = null;
+        }
+        // no atlas is built for a cleaned renderer
+        atlasBuilt = true;
         for (FiguraTextureSet set : textureSets)
             set.clean();
         for (FiguraTexture texture : customTextures.values())

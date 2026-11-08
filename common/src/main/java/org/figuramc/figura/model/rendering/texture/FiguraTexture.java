@@ -67,6 +67,19 @@ public class FiguraTexture extends SimpleTexture {
     private NativeImage backup;
     private boolean isClosed = false;
 
+    // -- alpha of the uploaded image -- //
+    // a texture whose pixels are all fully opaque or fully transparent draws the same with a cutout render type as with a translucent one
+    // (both discard alpha under 0.1), and cutout needs no back to front sorting, see ImmediateAvatarRenderer.getTexture
+    public static final byte ALPHA_UNKNOWN = 0, ALPHA_BINARY = 1, ALPHA_BLENDED = 2;
+    private volatile byte alphaKind = ALPHA_UNKNOWN;
+
+    // -- avatar atlas -- //
+    // where this texture sits in its avatar's atlas, null when it is drawn on its own (see AvatarAtlas)
+    AvatarAtlas.Region atlasRegion;
+    // an atlas texture is only uploaded on its own once a part needs it that way (uvs outside the texture, a render type the atlas can't serve)
+    private boolean standaloneWanted;
+    private boolean standaloneUploaded;
+
     public FiguraTexture(Avatar owner, String name, byte[] data) {
         super(new FiguraIdentifier("avatar_tex/" + owner.owner + "/" + UUID.randomUUID()));
 
@@ -91,7 +104,66 @@ public class FiguraTexture extends SimpleTexture {
                 this.upload = image;
             }
             this.texture = null;
+            // the image that will be uploaded is at hand here, usually off the render thread
+            this.alphaKind = scanAlpha(this.upload);
         }
+    }
+
+    // if every pixel is either fully opaque or fully transparent, stops at the first one that is neither
+    private static byte scanAlpha(NativeImage image) {
+        if (image == null || image.format() != NativeImage.Format.RGBA)
+            return ALPHA_BLENDED;
+        int w = image.getWidth(), h = image.getHeight();
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int alpha = image.getPixelRGBA(x, y) >>> 24;
+                if (alpha != 0 && alpha != 255)
+                    return ALPHA_BLENDED;
+            }
+        }
+        return ALPHA_BINARY;
+    }
+
+    // ALPHA_BINARY when the image on the GPU only has fully opaque and fully transparent pixels
+    public byte getAlphaKind() {
+        return alphaKind;
+    }
+
+    // the size of the image on the GPU (other players' textures over the size limit are downscaled)
+    public int getUploadWidth() {
+        int factor = getDownscaleFactor();
+        return factor > 1 ? Math.max((width + factor - 1) / factor, 1) : width;
+    }
+
+    public int getUploadHeight() {
+        int factor = getDownscaleFactor();
+        return factor > 1 ? Math.max((height + factor - 1) / factor, 1) : height;
+    }
+
+    public AvatarAtlas.Region getAtlasRegion() {
+        return atlasRegion;
+    }
+
+    // the texture is now also drawn on its own: uploaded standalone from the next upload on
+    public void requestStandalone() {
+        if (standaloneWanted)
+            return;
+        standaloneWanted = true;
+        if (!standaloneUploaded)
+            dirty = true;
+        uploadIfDirty();
+    }
+
+    // put in (or taken out of, with null) an atlas: the next upload writes the image there
+    void setAtlasRegion(AvatarAtlas.Region region) {
+        this.atlasRegion = region;
+        this.standaloneWanted = false;
+        // a standalone copy uploaded before is freed, it is uploaded again if a part asks for it
+        if (region != null && standaloneUploaded) {
+            standaloneUploaded = false;
+            this.releaseId();
+        }
+        this.dirty = true;
     }
 
     public FiguraTexture(Avatar owner, String name, int width, int height) {
@@ -200,12 +272,24 @@ public class FiguraTexture extends SimpleTexture {
                     NativeImage full = image();
                     int factor = getDownscaleFactor();
                     ready = factor > 1 ? downscale(full, factor) : full;
+                    // scripts may have changed the pixels since the last scan
+                    alphaKind = scanAlpha(ready);
                 }
 
-                TextureUtil.prepareImage(this.getId(), ready.getWidth(), ready.getHeight());
                 // the host's image and the ones scripts use stay here, the others are freed once on the GPU
                 boolean keep = ready == texture && !canDrop();
-                ready.upload(0, 0, 0, !keep);
+
+                AvatarAtlas.Region region = atlasRegion;
+                if (region != null)
+                    region.write(ready);
+
+                if (region == null || standaloneWanted) {
+                    TextureUtil.prepareImage(this.getId(), ready.getWidth(), ready.getHeight());
+                    ready.upload(0, 0, 0, !keep);
+                    standaloneUploaded = true;
+                } else if (!keep) {
+                    ready.close();
+                }
                 if (ready == texture && !keep)
                     texture = null;
             };
@@ -292,7 +376,16 @@ public class FiguraTexture extends SimpleTexture {
         return height;
     }
 
+    // the texture on its own: anything drawing it by location (sprites, the action wheel, scripts using the id) gets it uploaded standalone
+    // even when the model draws it from the avatar atlas
     public ResourceLocation getLocation() {
+        if (atlasRegion != null && !standaloneWanted)
+            requestStandalone();
+        return this.location;
+    }
+
+    // the location without asking for a standalone upload, for the model renderer, which decides between it and the atlas itself
+    public ResourceLocation getRawLocation() {
         return this.location;
     }
 

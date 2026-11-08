@@ -64,6 +64,7 @@
     "particle.ParticleAccessor",
     "particle.ParticleEngineMixin",
     "particle.SingleQuadParticleMixin",
+    "render.BufferBuilderAccessor",
     "render.CameraMixin",
     "render.EntityRenderDispatcherMixin",
     "render.GameRendererAccessor",

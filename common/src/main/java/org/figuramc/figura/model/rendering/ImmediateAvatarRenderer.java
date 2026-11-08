@@ -26,6 +26,7 @@ import org.figuramc.figura.math.matrix.FiguraMat3;
 import org.figuramc.figura.math.matrix.FiguraMat4;
 import org.figuramc.figura.math.vector.FiguraVec3;
 import org.figuramc.figura.model.*;
+import org.figuramc.figura.model.rendering.texture.AvatarAtlas;
 import org.figuramc.figura.model.rendering.texture.FiguraTexture;
 import org.figuramc.figura.model.rendering.texture.FiguraTextureSet;
 import org.figuramc.figura.model.rendering.texture.RenderTypes;
@@ -165,7 +166,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 && (!avatar.isHost || Configs.BODY_LOD_SELF.value)
                 && !AvatarCulling.isFocused(avatar.owner) && !AvatarCulling.isFullDetail(avatar.owner);
 
-        // custom textures
+        // custom textures (the atlas first, so the first upload of each texture already goes there)
+        prepareAtlas();
         for (FiguraTextureSet set : textureSets)
             set.uploadIfNeeded();
         for (FiguraTexture texture : customTextures.values())
@@ -863,6 +865,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         ret.cachedSet = textureSet;
 
         ret.renderType = null;
+        ret.opaqueRenderType = null;
+        ret.figuraTexture = null;
+        ret.region = null;
+        ret.atlasRenderType = null;
+        ret.atlasOpaqueRenderType = null;
         ret.fullBright = false;
         ret.vertexOffset = 0;
         ret.color = null;
@@ -881,45 +888,153 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         ret.primary = primary;
 
         // get render type
-        if (id != null) {
-            if (translucent) {
-                ret.renderType = RenderType.itemEntityTranslucentCull(id);
-                return ret;
-            }
-            if (glowing) {
-                ret.renderType = RenderType.outline(id);
-                return ret;
-            }
-        }
-
-        if (types == null)
+        ret.renderType = renderTypeFor(types, id, ret);
+        if (ret.renderType == null)
             return ret;
 
-        if (offsetRenderLayers && !primary && types.isOffset())
-            ret.vertexOffset = FiguraMod.VERTEX_OFFSET;
+        // avatar textures: a cutout version for when the texture has no partly transparent pixels,
+        // and the same render types on the avatar atlas for when the part's uvs stay inside the texture
+        FiguraTexture figuraTexture = textureSet.getFiguraTexture(texture);
+        if (figuraTexture == null)
+            return ret;
+        ret.figuraTexture = figuraTexture;
+        ret.opaqueRenderType = opaqueRenderTypeFor(types, id);
 
-        // Switch to cutout with fullbright if the iris emissive fix is enabled
-        if (doIrisEmissiveFix && types == RenderTypes.EMISSIVE) {
-            ret.fullBright = true;
-            ret.renderType = RenderTypes.TRANSLUCENT_CULL.get(id);
-        } else {
-            ret.renderType = types.get(id);
+        AvatarAtlas.Region region = atlasRegion(figuraTexture);
+        if (region != null && atlasCompatible(types)) {
+            ResourceLocation atlasId = region.atlas.getLocation();
+            ret.region = region;
+            ret.atlasRenderType = renderTypeFor(types, atlasId, null);
+            ret.atlasOpaqueRenderType = opaqueRenderTypeFor(types, atlasId);
         }
 
         return ret;
     }
 
+    // the render type for a texture, ret (may be null) gets the vertex offset and full bright flag
+    private RenderType renderTypeFor(RenderTypes types, ResourceLocation id, VertexData ret) {
+        if (id != null) {
+            if (translucent)
+                return RenderType.itemEntityTranslucentCull(id);
+            if (glowing)
+                return RenderType.outline(id);
+        }
+
+        if (types == null)
+            return null;
+
+        if (ret != null && offsetRenderLayers && !ret.primary && types.isOffset())
+            ret.vertexOffset = FiguraMod.VERTEX_OFFSET;
+
+        // Switch to cutout with fullbright if the iris emissive fix is enabled
+        if (doIrisEmissiveFix && types == RenderTypes.EMISSIVE) {
+            if (ret != null)
+                ret.fullBright = true;
+            return RenderTypes.TRANSLUCENT_CULL.get(id);
+        }
+        return types.get(id);
+    }
+
+    // translucent entity render types and their cutout twins: the same shader, lighting and culling, both discard alpha under 0.1,
+    // so with only fully opaque or fully transparent pixels they draw the same, and cutout skips the sorting of translucent geometry
+    private static final boolean OPAQUE_CUTOUT = !"false".equalsIgnoreCase(System.getProperty("figura.opaqueCutout"));
+
+    private RenderType opaqueRenderTypeFor(RenderTypes types, ResourceLocation id) {
+        if (!OPAQUE_CUTOUT || id == null || translucent || glowing)
+            return null;
+        if (types == RenderTypes.TRANSLUCENT)
+            return RenderTypes.CUTOUT.get(id);
+        if (types == RenderTypes.TRANSLUCENT_CULL)
+            return RenderTypes.CUTOUT_CULL.get(id);
+        return null;
+    }
+
+    // the render types that sample the texture plainly by its uvs (no scrolling, blurring or screen space), so an atlas region works
+    private boolean atlasCompatible(RenderTypes types) {
+        if (translucent || glowing)
+            return true;
+        return switch (types) {
+            case CUTOUT, CUTOUT_CULL, TRANSLUCENT, TRANSLUCENT_CULL, EMISSIVE, EYES -> true;
+            default -> false;
+        };
+    }
+
     private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner) {
+        int vertCount = Math.min(faceCount * 4, vertices.size());
+        int w = textureSet.getWidth(), h = textureSet.getHeight();
+
+        // fully opaque or fully transparent texture, drawn fully opaque: the cutout twin
+        FiguraTexture figuraTexture = vertexData.figuraTexture;
+        boolean opaque = figuraTexture != null && customization.alpha >= 1f && figuraTexture.getAlphaKind() == FiguraTexture.ALPHA_BINARY;
+
+        RenderType renderType;
+        AvatarAtlas.Region region = null;
+        if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount)) {
+            region = vertexData.region;
+            renderType = opaque && vertexData.atlasOpaqueRenderType != null ? vertexData.atlasOpaqueRenderType : vertexData.atlasRenderType;
+        } else {
+            // drawn from the texture itself: make sure it is on the GPU on its own
+            if (figuraTexture != null && figuraTexture.getAtlasRegion() != null)
+                figuraTexture.requestStandalone();
+            renderType = opaque && vertexData.opaqueRenderType != null ? vertexData.opaqueRenderType : vertexData.renderType;
+        }
+
         // everything the write needs is copied now, the vertices themselves are read when the buffer is consumed
         // (the customization is a copy owned by the stack, so its values are the same as when the buffer is consumed)
-        VERTEX_BUFFER.add(vertexData.renderType, vertexData.primary).set(
-                Math.min(faceCount * 4, vertices.size()), vertices, packed, owner, customization,
-                textureSet.getWidth(), textureSet.getHeight(), vertexData
+        VERTEX_BUFFER.add(renderType, vertexData.primary).set(
+                vertCount, vertices, packed, owner, customization, w, h, vertexData, region
         );
     }
 
+    // uv bounds (in texture pixels) of packed vertex arrays: min u, min v, max u, max v, computed once per array
+    private static final Map<float[], float[]> UV_BOUNDS = new WeakHashMap<>();
+
+    // if every uv of the batch, after the part's uv matrix, stays within the texture: then it can be drawn from an atlas region
+    // vertices scripts can reach are never atlased, a script may still change their uvs before the batch is written
+    private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount) {
+        if (packed == null || (owner != null && owner.verticesExposed()) || w <= 0 || h <= 0)
+            return false;
+        float[] bounds = UV_BOUNDS.get(packed);
+        if (bounds == null) {
+            float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
+            for (int o = 0; o < packed.length; o += FiguraModelPart.PACKED_STRIDE) {
+                float u = packed[o + 3], v = packed[o + 4];
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            bounds = new float[] {minU, minV, maxU, maxV};
+            UV_BOUNDS.put(packed, bounds);
+        }
+        if (bounds[0] > bounds[2])
+            return false;
+
+        // same uv transform as Batch.set: pixels to 0..1, then the uv matrix; affine, so the corners bound it
+        FiguraMat3 t = customization.uvMatrix;
+        double t11 = t.v11 / w, t12 = t.v12 / h, t13 = t.v13;
+        double t21 = t.v21 / w, t22 = t.v22 / h, t23 = t.v23;
+        for (int corner = 0; corner < 4; corner++) {
+            double u = (corner & 1) == 0 ? bounds[0] : bounds[2];
+            double v = (corner & 2) == 0 ? bounds[1] : bounds[3];
+            double tu = t11 * u + t12 * v + t13, tv = t21 * u + t22 * v + t23;
+            if (tu < -UV_EPSILON || tu > 1 + UV_EPSILON || tv < -UV_EPSILON || tv > 1 + UV_EPSILON)
+                return false;
+        }
+        return true;
+    }
+
+    private static final double UV_EPSILON = 1e-4;
+
     private static class VertexData {
         public RenderType renderType;
+        // the cutout twin of renderType, used when the texture has no partly transparent pixels, may be null
+        public RenderType opaqueRenderType;
+        // the avatar texture drawn, null for skins and other textures that are not the avatar's
+        public FiguraTexture figuraTexture;
+        // the texture's place in the avatar atlas and the render types there, null when the atlas can't be used
+        public AvatarAtlas.Region region;
+        public RenderType atlasRenderType, atlasOpaqueRenderType;
         public boolean fullBright;
         public float vertexOffset;
         public FiguraVec3 color;
@@ -950,7 +1065,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         private float r, g, b, a;
         private int overlay, light;
 
-        void set(int vertCount, List<Vertex> vertices, float[] packed, FiguraModelPart owner, PartCustomization customization, double w, double h, VertexData vertexData) {
+        void set(int vertCount, List<Vertex> vertices, float[] packed, FiguraModelPart owner, PartCustomization customization, double w, double h, VertexData vertexData, AvatarAtlas.Region region) {
             this.vertCount = vertCount;
             this.vertices = vertices;
             this.packed = packed;
@@ -970,6 +1085,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             FiguraMat3 t = customization.uvMatrix;
             t11 = t.v11 / w; t12 = t.v12 / h; t13 = t.v13;
             t21 = t.v21 / w; t22 = t.v22 / h; t23 = t.v23;
+            // drawn from the avatar atlas: the 0 to 1 uv of the texture moved into its region
+            if (region != null) {
+                t11 *= region.scaleU; t12 *= region.scaleU; t13 = t13 * region.scaleU + region.offsetU;
+                t21 *= region.scaleV; t22 *= region.scaleV; t23 = t23 * region.scaleV + region.offsetV;
+            }
 
             offset = vertexData.vertexOffset;
             r = (float) vertexData.color.x; g = (float) vertexData.color.y; b = (float) vertexData.color.z; a = customization.alpha;

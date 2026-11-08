@@ -84,17 +84,32 @@ public class FiguraTextureSet {
                     yield MissingTextureAtlasSprite.getLocation();
                 }
             }
-            case PRIMARY -> textures[0] == null ? null : textures[0].getLocation();
-            case SECONDARY -> textures[1] == null ? null : textures[1].getLocation();
-            case SPECULAR -> textures[2] == null ? null : textures[2].getLocation();
-            case NORMAL -> textures[3] == null ? null : textures[3].getLocation();
+            case PRIMARY -> textures[0] == null ? null : textures[0].getRawLocation();
+            case SECONDARY -> textures[1] == null ? null : textures[1].getRawLocation();
+            case SPECULAR -> textures[2] == null ? null : textures[2].getRawLocation();
+            case NORMAL -> textures[3] == null ? null : textures[3].getRawLocation();
             case CUSTOM -> {
                 try {
-                    yield ((FiguraTexture) pair.getValue()).getLocation();
+                    yield ((FiguraTexture) pair.getValue()).getRawLocation();
                 } catch (Exception ignored) {
                     yield MissingTextureAtlasSprite.getLocation();
                 }
             }
+        };
+    }
+
+    // the avatar texture a customization draws with, null for skins, capes, elytras and resource textures
+    public FiguraTexture getFiguraTexture(TextureCustomization pair) {
+        OverrideType type;
+        if (pair == null || (type = pair.getOverrideType()) == null)
+            return null;
+        return switch (type) {
+            case PRIMARY -> textures[0];
+            case SECONDARY -> textures[1];
+            case SPECULAR -> textures[2];
+            case NORMAL -> textures[3];
+            case CUSTOM -> pair.getValue() instanceof FiguraTexture t ? t : null;
+            default -> null;
         };
     }
 
