@@ -139,10 +139,6 @@ public class AvatarCulling {
     private static final double COST_SMOOTHING = 0.2;
     // how fast the estimate decays when the scripts ran but took no measurable time
     private static final double COST_DECAY = 0.9;
-    // the budget never makes an avatar run its render scripts less than once every this many frames
-    // kept low so script driven physics still looks fluid, even if that means going over the budget with many heavy avatars
-    private static final int MAX_BUDGET_INTERVAL = 3;
-
     // the highest interval the budgets may give an avatar: the ones drawn with reduced detail (far away, or not among the closest
     // when a crowd is around) accept a slower script rate too, so the budgets can hold with many heavy avatars
     private static int maxBudgetInterval(Avatar avatar, int closest) {
@@ -151,13 +147,28 @@ public class AvatarCulling {
     }
 
     private static final List<Avatar> THROTTLED = new ArrayList<>();
+    private static final List<Avatar> DUE = new ArrayList<>();
 
-    // other players' render scripts only run once every few frames
-    // the interval is the fixed one from the config, raised for the expensive avatars so all of them together stay within the time budget
+    // the budget never makes an avatar run its render scripts less often than this many times per second
+    private static final double MIN_RENDER_SCRIPT_RATE = 15;
+    // estimated frames per second, for the budget when the scripts may run every frame
+    private static long lastFrameNanos;
+    private static double frameRate = 60;
+
+    // other players' render scripts run at most Render Script Rate times per second, whatever the frame rate, so their cost no longer
+    // grows with it; the expensive avatars run them less often so all of them together stay within the budget (milliseconds per 1/60 s).
+    // Every part is still drawn every frame: parts moved by the scripts are smoothed between runs (ScriptTransformInterpolator).
     // the host, camera, focused and full detail avatars always run every frame
     private static void throttleRenderScripts() {
-        int fixedInterval = Math.max(Configs.AVATAR_RENDER_SCRIPT_INTERVAL.value, 1);
-        double budget = Configs.AVATAR_RENDER_SCRIPT_BUDGET.value * 1_000_000d;
+        long now = Avatar.getLevelFrameNanos();
+        if (lastFrameNanos != 0 && now > lastFrameNanos)
+            frameRate += (1e9 / (now - lastFrameNanos) - frameRate) * 0.05;
+        lastFrameNanos = now;
+
+        int rateConfig = Configs.AVATAR_RENDER_SCRIPT_RATE.value;
+        // the most runs per second, the configured rate or every frame
+        double maxRate = rateConfig > 0 ? Math.min(rateConfig, frameRate) : frameRate;
+        double budget = Configs.AVATAR_RENDER_SCRIPT_BUDGET.value * 1_000_000d * 60d;
         Entity cameraEntity = Minecraft.getInstance().getCameraEntity();
         UUID cameraId = cameraEntity == null ? null : cameraEntity.getUUID();
 
@@ -165,25 +176,57 @@ public class AvatarCulling {
         for (Avatar avatar : AVATARS) {
             measureRenderScripts(avatar);
             avatar.renderScriptsSkipped = false;
+            avatar.renderScriptInterval = 0;
             if (!avatar.isHost && !avatar.owner.equals(cameraId) && !FOCUSED.contains(avatar.owner) && !FULL_DETAIL.contains(avatar.owner) && !avatar.isRenderSkipped())
                 THROTTLED.add(avatar);
+            else
+                avatar.nextRenderScriptRun = Long.MIN_VALUE;
         }
 
-        // the cost each avatar may use per frame, the most expensive ones are capped first
-        double cap = budget > 0 ? budgetCap(THROTTLED, budget, avatar -> avatar.renderScriptCost) : Double.MAX_VALUE;
+        // the script time per second each avatar may use, the most expensive ones are capped first
+        double cap = budget > 0 ? budgetCap(THROTTLED, budget, avatar -> avatar.renderScriptCost * maxRate) : Double.MAX_VALUE;
 
         for (Avatar avatar : THROTTLED) {
-            int interval = fixedInterval;
-            if (avatar.renderScriptCost > cap)
-                interval = Math.max(interval, (int) Math.min(Math.ceil(avatar.renderScriptCost / cap), maxBudgetInterval(avatar, MAX_BUDGET_INTERVAL)));
+            double rate = maxRate;
+            if (avatar.renderScriptCost > 0 && avatar.renderScriptCost * maxRate > cap)
+                rate = Math.max(Math.min(MIN_RENDER_SCRIPT_RATE, maxRate), cap / avatar.renderScriptCost);
 
-            // runs once every interval frames on average, and keeps its own phase when the interval changes
-            avatar.renderScriptCredit += 1d / interval;
-            if (avatar.renderScriptCredit >= 1)
-                avatar.renderScriptCredit -= Math.floor(avatar.renderScriptCredit);
+            // every frame anyway: nothing to time or smooth
+            if (rate >= frameRate * 0.98) {
+                avatar.nextRenderScriptRun = Long.MIN_VALUE;
+                continue;
+            }
+
+            long interval = (long) (1e9 / rate);
+            avatar.renderScriptInterval = interval;
+            // first time (or back after a while): a start of its own, so throttled avatars run on different frames
+            if (avatar.nextRenderScriptRun == Long.MIN_VALUE || avatar.nextRenderScriptRun - now > interval || now - avatar.nextRenderScriptRun > 4 * interval)
+                avatar.nextRenderScriptRun = now + (long) (interval * (Math.floorMod(avatar.owner.hashCode(), 1024) / 1024d));
+
+            if (now >= avatar.nextRenderScriptRun)
+                DUE.add(avatar);
             else
                 avatar.renderScriptsSkipped = true;
         }
+
+        // the avatars due this frame run the most overdue first, while their estimated cost fits this frame's share of the budget;
+        // the others wait for the next frame, so expensive avatars don't all run on the same frame (a stutter) but take turns.
+        // The first one always runs, so even an avatar costing more than the whole share keeps running.
+        double frameShare = budget > 0 ? budget / Math.min(frameRate, 60d) : Double.MAX_VALUE;
+        DUE.sort(Comparator.comparingLong(avatar -> avatar.nextRenderScriptRun));
+        double used = 0;
+        for (int i = 0; i < DUE.size(); i++) {
+            Avatar avatar = DUE.get(i);
+            if (i > 0 && used + avatar.renderScriptCost > frameShare) {
+                avatar.renderScriptsSkipped = true;
+                continue;
+            }
+            used += avatar.renderScriptCost;
+            avatar.nextRenderScriptRun += avatar.renderScriptInterval;
+            if (avatar.nextRenderScriptRun < now)
+                avatar.nextRenderScriptRun = now;
+        }
+        DUE.clear();
 
         // remembered for the next frame measure
         for (Avatar avatar : AVATARS)

@@ -433,10 +433,10 @@
     "figura.config.avatar_texture_size.tooltip": "Other players' avatar textures larger than this many pixels are shrunk on the GPU, saving video memory\nScripts still see the full texture\n0 keeps the original size",
     "figura.config.body_lod": "Body Detail Reduction",
     "figura.config.body_lod.tooltip": "Reduces the triangle and cube count of other players' avatars, except for the parts attached to the head\nApplies when an avatar is (re)loaded",
-    "figura.config.avatar_render_script_interval": "Other Avatars' Render Script Interval",
-    "figura.config.avatar_render_script_interval.tooltip": "Other players' render scripts (render events and part render functions) only run once every this many frames\nScript driven motion looks choppier, Blockbench animations stay smooth\nYour own avatar and focused players always run every frame\n1 runs them every frame",
+    "figura.config.avatar_render_script_rate": "Other Avatars' Render Script Rate",
+    "figura.config.avatar_render_script_rate.tooltip": "How many times per second other players' render scripts (render events and part render functions) run at most, whatever your frame rate\nParts moved by scripts are smoothed in between, so they keep moving every frame, slightly behind\nEvery part is still drawn every frame\nYour own avatar and focused players always run every frame\n0 runs them every frame",
     "figura.config.avatar_render_script_budget": "Other Avatars' Render Script Budget",
-    "figura.config.avatar_render_script_budget.tooltip": "Time in milliseconds per frame that other players' render scripts can use together\nAvatars with expensive scripts run them less often to stay within it (at least once every 3 frames), cheap ones keep running every frame\nYour own avatar, focused players and players set to full detail are never limited\n0 disables the budget",
+    "figura.config.avatar_render_script_budget.tooltip": "Milliseconds of other players' render scripts allowed per 1/60 of a second, all together (1 = 60 ms of scripts per second)\nAvatars with expensive scripts run them less often to stay within it (down to 15 times per second), cheap ones keep the full rate\nYour own avatar, focused players and players set to full detail are never limited\n0 disables the budget",
     "figura.config.spread_tick_scripts": "Spread Tick Scripts Over Frames",
     "figura.config.spread_tick_scripts.tooltip": "Runs other players' tick scripts on the frames between two game ticks instead of all on the same frame, which removes the stutter they cause 20 times a second
 The scripts see the same world state either way, their changes can just show up to one tick later

@@ -58,8 +58,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     // if the profiler is active this pass, the per-part labels are skipped otherwise
     private boolean profiling;
 
-    // if the part render functions are skipped this pass (Other Avatars' Render Script Interval)
+    // if the part render functions are skipped this pass (Other Avatars' Render Script Rate)
     private boolean skipPartScripts;
+    // nanoseconds between two runs of this avatar's render scripts when they are time limited, its parts are then smoothed
+    // in between (ScriptTransformInterpolator); 0 when they run every frame
+    private long smoothInterval;
 
     // -- frame replay -- //
     // in a crowd, only the closest players are drawn from their model every frame (AvatarCulling.throttleRedraws): the others alternate
@@ -155,6 +158,10 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // the render scripts of this avatar are skipped this frame, only for the player in the world and its world pass
         // or already ran in this frame's shadow pass, whose results this pass draws
+        // smoothing only where the scripts are limited: the player in the world and its world pass (gui and first person run every frame)
+        smoothInterval = avatar.isHost || !(avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD
+                || avatar.renderMode == EntityRenderMode.OTHER) ? 0 : avatar.renderScriptInterval;
+
         skipPartScripts = (avatar.renderScriptsSkipped
                 && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD))
                 || avatar.reusesShadowScripts();
@@ -512,7 +519,15 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // recalculate stuff
         popPush("calculatePartMatrices");
+        // time limited render scripts: the part shows its script transforms (or setMatrix matrix) blended between the last runs,
+        // the real values come back right after, so scripts always read what they set
+        long frameNanos = Avatar.getLevelFrameNanos();
+        boolean smoothed = (smoothInterval > 0 || part.interpolation != null)
+                && ScriptTransformInterpolator.apply(part, smoothInterval, frameNanos, part.hasVanillaOffsets());
         custom.recalculate();
+        if (smoothed)
+            ScriptTransformInterpolator.restore(part);
+        boolean matrixSmoothed = smoothInterval > 0 && ScriptTransformInterpolator.applyMatrix(part, smoothInterval, frameNanos);
 
         // void blocked matrices
         // that's right, check only for previous predicate
@@ -536,6 +551,9 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             custom.positionMatrix.set(voidedPosition);
             custom.normalMatrix.set(voidedNormal);
         }
+        // the stack holds the blended matrix now, the part gets its real one back
+        if (matrixSmoothed)
+            ScriptTransformInterpolator.restoreMatrix(part);
 
         if (thisPassedPredicate) {
             // recalculate world matrices
@@ -841,10 +859,18 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return;
         }
 
+        // vertices edited by time limited render scripts (cloth, hair cards): drawn blended between the last runs of the scripts
+        boolean blended = false;
+        if (smoothInterval > 0 && owner != null && owner.verticesExposed()) {
+            packed = ScriptTransformInterpolator.blendVertices(owner, vertices, smoothInterval, Avatar.getLevelFrameNanos());
+            owner = null;
+            blended = true;
+        }
+
         if (primary.renderType != null)
-            pushToBuffer(faceCount, primary, customization, textureSet, vertices, packed, owner);
+            pushToBuffer(faceCount, primary, customization, textureSet, vertices, packed, owner, blended);
         if (secondary.renderType != null)
-            pushToBuffer(faceCount, secondary, customization, textureSet, vertices, packed, owner);
+            pushToBuffer(faceCount, secondary, customization, textureSet, vertices, packed, owner, blended);
     }
 
     private VertexData getTexture(PartCustomization customization, FiguraTextureSet textureSet, boolean primary) {
@@ -959,7 +985,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         };
     }
 
-    private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner) {
+    // blended: packed holds vertices blended this frame (ScriptTransformInterpolator), never atlased since their uvs may change
+    private void pushToBuffer(int faceCount, VertexData vertexData, PartCustomization customization, FiguraTextureSet textureSet, List<Vertex> vertices, float[] packed, FiguraModelPart owner, boolean blended) {
         int vertCount = Math.min(faceCount * 4, vertices.size());
         int w = textureSet.getWidth(), h = textureSet.getHeight();
 
@@ -969,7 +996,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         RenderType renderType;
         AvatarAtlas.Region region = null;
-        if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount)) {
+        if (vertexData.region != null && !blended && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount)) {
             region = vertexData.region;
             renderType = opaque && vertexData.atlasOpaqueRenderType != null ? vertexData.atlasOpaqueRenderType : vertexData.atlasRenderType;
         } else {

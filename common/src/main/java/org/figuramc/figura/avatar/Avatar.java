@@ -151,6 +151,10 @@ public class Avatar {
     // progress towards the next render script run, they run when it reaches 1, and if they ran on the last frame
     public double renderScriptCredit;
     public boolean renderScriptsRan;
+    // time limited render scripts (AvatarCulling): nanoseconds between two runs, 0 when they run every frame,
+    // and the level frame time from which they may run again. Parts moved by the scripts are smoothed in between (ScriptTransformInterpolator)
+    public long renderScriptInterval;
+    public long nextRenderScriptRun = Long.MIN_VALUE;
     // set every frame by AvatarCulling, for the players beyond the closest Full Rate Players
     // redrawThrottled: the model pass keeps what it draws, redrawSkipped: it draws the kept frame again instead of walking the model
     public boolean redrawThrottled, redrawSkipped;
@@ -484,10 +488,18 @@ public class Avatar {
     // called once per frame, before the shadow pass
     public static void beginLevelFrame() {
         levelFrame++;
+        levelFrameNanos = System.nanoTime();
     }
 
     public static long getLevelFrame() {
         return levelFrame;
+    }
+
+    // System.nanoTime() at the start of the level frame, the same for every pass of the frame
+    private static long levelFrameNanos = System.nanoTime();
+
+    public static long getLevelFrameNanos() {
+        return levelFrameNanos;
     }
 
     // the context given to the render scripts

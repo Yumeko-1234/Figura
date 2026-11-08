@@ -69,6 +69,7 @@ public class PartCustomization {
     public void recalculate() {
         if (!needsMatrixRecalculation)
             return;
+        customMatrix = false;
 
         // vanilla parents and animations set their values again every frame, even when nothing moved,
         // so when every input is the same as last time (and the matrices weren't changed since), the result is the same too
@@ -353,7 +354,70 @@ public class PartCustomization {
         return animScale.copy();
     }
 
+    // -- render script smoothing (ScriptTransformInterpolator) -- //
+
+    // the matrices were set directly (setMatrix) since they were last computed, so the transforms do not make them
+    private boolean customMatrix;
+
+    public boolean hasCustomMatrix() {
+        return customMatrix && !needsMatrixRecalculation;
+    }
+
+    // position, rotation, scale and offset rotation, the transforms scripts set on the part
+    void readScriptTransforms(double[] out) {
+        out[0] = position.x; out[1] = position.y; out[2] = position.z;
+        out[3] = rotation.x; out[4] = rotation.y; out[5] = rotation.z;
+        out[6] = scale.x; out[7] = scale.y; out[8] = scale.z;
+        out[9] = offsetRot.x; out[10] = offsetRot.y; out[11] = offsetRot.z;
+    }
+
+    void writeScriptTransforms(double[] in) {
+        position.set(in[0], in[1], in[2]);
+        rotation.set(in[3], in[4], in[5]);
+        scale.set(in[6], in[7], in[8]);
+        offsetRot.set(in[9], in[10], in[11]);
+        needsMatrixRecalculation = true;
+    }
+
+    // the position matrix (row by row) and the normal matrix
+    void readMatrix(double[] position, double[] normal) {
+        FiguraMat4 p = positionMatrix;
+        position[0] = p.v11; position[1] = p.v12; position[2] = p.v13; position[3] = p.v14;
+        position[4] = p.v21; position[5] = p.v22; position[6] = p.v23; position[7] = p.v24;
+        position[8] = p.v31; position[9] = p.v32; position[10] = p.v33; position[11] = p.v34;
+        position[12] = p.v41; position[13] = p.v42; position[14] = p.v43; position[15] = p.v44;
+        FiguraMat3 n = normalMatrix;
+        normal[0] = n.v11; normal[1] = n.v12; normal[2] = n.v13;
+        normal[3] = n.v21; normal[4] = n.v22; normal[5] = n.v23;
+        normal[6] = n.v31; normal[7] = n.v32; normal[8] = n.v33;
+    }
+
+    void writeMatrix(double[] position, double[] normal) {
+        FiguraMat4 p = positionMatrix;
+        p.v11 = position[0]; p.v12 = position[1]; p.v13 = position[2]; p.v14 = position[3];
+        p.v21 = position[4]; p.v22 = position[5]; p.v23 = position[6]; p.v24 = position[7];
+        p.v31 = position[8]; p.v32 = position[9]; p.v33 = position[10]; p.v34 = position[11];
+        p.v41 = position[12]; p.v42 = position[13]; p.v43 = position[14]; p.v44 = position[15];
+        FiguraMat3 n = normalMatrix;
+        n.v11 = normal[0]; n.v12 = normal[1]; n.v13 = normal[2];
+        n.v21 = normal[3]; n.v22 = normal[4]; n.v23 = normal[5];
+        n.v31 = normal[6]; n.v32 = normal[7]; n.v33 = normal[8];
+    }
+
+    // shows a blended position matrix, with its normal matrix computed like setMatrix does, without changing the part's flags
+    void writeBlendedMatrix(double[] position) {
+        FiguraMat4 p = positionMatrix;
+        p.v11 = position[0]; p.v12 = position[1]; p.v13 = position[2]; p.v14 = position[3];
+        p.v21 = position[4]; p.v22 = position[5]; p.v23 = position[6]; p.v24 = position[7];
+        p.v31 = position[8]; p.v32 = position[9]; p.v33 = position[10]; p.v34 = position[11];
+        p.v41 = position[12]; p.v42 = position[13]; p.v43 = position[14]; p.v44 = position[15];
+        normalMatrix.set(p.v11, p.v21, p.v31, p.v12, p.v22, p.v32, p.v13, p.v23, p.v33);
+        normalMatrix.invert();
+        normalMatrix.transpose();
+    }
+
     public void setMatrix(FiguraMat4 matrix) {
+        customMatrix = true;
         positionMatrix.set(matrix);
         // normal matrix = inverse transpose of the 3x3 part, computed in place instead of on a deaugmented copy
         normalMatrix.set(matrix.v11, matrix.v21, matrix.v31, matrix.v12, matrix.v22, matrix.v32, matrix.v13, matrix.v23, matrix.v33);

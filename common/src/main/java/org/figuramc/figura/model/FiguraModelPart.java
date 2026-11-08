@@ -51,6 +51,13 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     // offset pivot, pos, rot and scale from before applyVanillaTransforms, restored by resetVanillaTransforms
     private FiguraVec3[] savedOffsets;
     private boolean vanillaApplied;
+    // smoothing of what its scripts set while they are time limited, null when not smoothed (ScriptTransformInterpolator)
+    public ScriptTransformInterpolator.State interpolation;
+
+    // if the vanilla parent offsets were added to the customization this frame (and not reset yet)
+    public boolean hasVanillaOffsets() {
+        return vanillaApplied;
+    }
     // scratch vectors for applyVanillaTransforms, only used on the render thread and never kept
     private static final FiguraVec3 VANILLA_PIVOT = FiguraVec3.of(), VANILLA_SCALE = FiguraVec3.of();
     // same for applyExtraTransforms, the rotation is built once with the exact values rotateY(180) gives
