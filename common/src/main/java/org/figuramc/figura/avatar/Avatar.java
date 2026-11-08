@@ -415,7 +415,7 @@ public class Avatar {
         // stuff that was not run yet
         flushQueuedEvents();
 
-        if (scriptError || luaRuntime == null || !loaded)
+        if (scriptError || luaRuntime == null || !loaded || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
             return null;
 
         // run event, timing the render scripts

@@ -55,6 +55,8 @@ public final class FiguraBenchmark {
     private static final String RESULTS = System.getProperty("figura.benchmark.results", "benchmark-results.txt");
     // a folder of .nbt avatars: one client-side player per avatar, in rows in front of the camera (first person, own avatar off)
     private static final String CROWD = System.getProperty("figura.benchmark.crowd", "");
+    // -Dfigura.benchmark.noLua=true: other avatars run no scripts once loaded (what drawing alone costs)
+    public static final boolean NO_LUA = ENABLED && Boolean.getBoolean("figura.benchmark.noLua");
     private static final boolean CROWD_MODE = !CROWD.isBlank();
     // false: the same players without avatars (the cost of the players alone)
     private static final boolean CROWD_AVATARS = !"false".equalsIgnoreCase(System.getProperty("figura.benchmark.crowdAvatars"));
