@@ -371,11 +371,12 @@ public class PartCustomization {
         out[9] = offsetRot.x; out[10] = offsetRot.y; out[11] = offsetRot.z;
     }
 
-    void writeScriptTransforms(double[] in) {
+    void writeScriptTransforms(double[] in, boolean withOffsetRot) {
         position.set(in[0], in[1], in[2]);
         rotation.set(in[3], in[4], in[5]);
         scale.set(in[6], in[7], in[8]);
-        offsetRot.set(in[9], in[10], in[11]);
+        if (withOffsetRot)
+            offsetRot.set(in[9], in[10], in[11]);
         needsMatrixRecalculation = true;
     }
 

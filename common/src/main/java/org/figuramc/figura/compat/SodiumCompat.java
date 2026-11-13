@@ -252,8 +252,11 @@ public class SodiumCompat {
 
         @Override
         public void pushRaw(long address, int vertices) {
-            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
-                writer.push(stack, address, vertices, DESCRIPTION);
+            // in chunks: a consumer that feeds two buffers copies what it gets onto the 64 KiB MemoryStack
+            for (int done = 0; done < vertices; done += BATCH) {
+                try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                    writer.push(stack, address + (long) done * STRIDE, Math.min(BATCH, vertices - done), DESCRIPTION);
+                }
             }
         }
 
@@ -350,8 +353,12 @@ public class SodiumCompat {
 
         @Override
         public void pushRaw(long address, int vertices) {
-            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
-                writer.push(stack, address, vertices, net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.FORMAT);
+            // in chunks: a consumer that feeds two buffers (glowing outline) copies what it gets onto the 64 KiB MemoryStack
+            for (int done = 0; done < vertices; done += BATCH) {
+                try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                    writer.push(stack, address + (long) done * net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.STRIDE,
+                            Math.min(BATCH, vertices - done), net.caffeinemc.mods.sodium.api.vertex.format.common.ModelVertex.FORMAT);
+                }
             }
         }
     }

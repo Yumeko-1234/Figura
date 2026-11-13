@@ -1,5 +1,6 @@
 package org.figuramc.figura.model.rendering;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.datafixers.util.Pair;
 import net.minecraft.client.Camera;
@@ -206,6 +207,12 @@ public abstract class AvatarRenderer {
 
     public void invalidate() {
         this.dirty = true;
+        // textures and the atlas are freed on the render thread only: an avatar unloaded from another thread (the backend
+        // websocket when a player changes avatar) would free images the render thread is still reading
+        if (!RenderSystem.isOnRenderThread()) {
+            RenderSystem.recordRenderCall(this::invalidate);
+            return;
+        }
         if (!this.isRendering)
             clean();
     }

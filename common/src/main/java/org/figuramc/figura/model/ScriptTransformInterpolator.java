@@ -31,6 +31,8 @@ public final class ScriptTransformInterpolator {
         // transforms
         final double[] from = new double[VALUES], to = new double[VALUES], shown = new double[VALUES], real = new double[VALUES];
         long start, seen = Long.MIN_VALUE, interval;
+        // the offset rotation held the vanilla rotation when blended, so it was left alone and restore must leave it alone too
+        boolean keepOffsetRot;
         // setMatrix matrix: 16 position values, and the real normal matrix while the blended one is shown
         final double[] mFrom = new double[16], mTo = new double[16], mShown = new double[16], mReal = new double[16];
         final double[] nReal = new double[9];
@@ -107,15 +109,19 @@ public final class ScriptTransformInterpolator {
 
         if (same(s.shown, s.real, VALUES))
             return false;
-        custom.writeScriptTransforms(s.shown);
+        s.keepOffsetRot = vanillaOffsets;
+        custom.writeScriptTransforms(s.shown, !vanillaOffsets);
         return true;
     }
 
-    // gives the part its real transforms back, after its matrices were computed from the blended ones
+    // gives the part its real transforms back, after its matrices were computed from the blended ones.
+    // An offset rotation that held the vanilla rotation is not written back: a mod may have taken the vanilla rotation out of it
+    // in between (figura_extra_fight resets the vanilla transforms before posing a part on an Epic Fight joint), and writing
+    // it back would leave the vanilla rotation in it, added again every frame, so the part would spin
     public static void restore(FiguraModelPart part) {
         State s = part.interpolation;
         if (s != null)
-            part.customization.writeScriptTransforms(s.real);
+            part.customization.writeScriptTransforms(s.real, !s.keepOffsetRot);
     }
 
     /**

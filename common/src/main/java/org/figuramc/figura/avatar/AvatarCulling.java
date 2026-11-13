@@ -13,7 +13,6 @@ import net.minecraft.world.phys.Vec3;
 import org.figuramc.figura.FiguraMod;
 import org.figuramc.figura.compat.EpicFightPoseThrottle;
 import org.figuramc.figura.config.Configs;
-import org.figuramc.figura.model.FiguraModelPartReader;
 import org.figuramc.figura.model.rendering.AvatarRenderer;
 import org.figuramc.figura.model.rendering.ImmediateAvatarRenderer;
 import org.figuramc.figura.permissions.Permissions;
@@ -102,7 +101,7 @@ public class AvatarCulling {
     // -- full detail -- //
 
     /**
-     * Full detail players are never simplified: no Body Detail Reduction, Simplify Avatar Bodies, distance or crowd detail loss.
+     * Full detail players are never simplified: no Body Detail Reduction.
      * Their scripts are never throttled either: no render script interval or budget, tick script budget or culled tick interval.
      * Unlike focus, they are still culled.
      */
@@ -171,8 +170,8 @@ public class AvatarCulling {
             return;
 
         cull(level, poseStack, projection, camera);
+        updateCrowdScripts(level);
         collectCrowd(level);
-        limitCrowdDetail();
         throttleRenderScripts();
         throttleRedraws();
         EpicFightPoseThrottle.update(level, camX, camY, camZ);
@@ -182,12 +181,6 @@ public class AvatarCulling {
     private static final double COST_SMOOTHING = 0.2;
     // how fast the estimate decays when the scripts ran but took no measurable time
     private static final double COST_DECAY = 0.9;
-    // the highest interval the budgets may give an avatar: the ones drawn with reduced detail (far away, or not among the closest
-    // when a crowd is around) accept a slower script rate too, so the budgets can hold with many heavy avatars
-    private static int maxBudgetInterval(Avatar avatar, int closest) {
-        int far = Configs.FAR_SCRIPT_INTERVAL.value;
-        return avatar.lodLevel > 0 && far > closest ? far : closest;
-    }
 
     private static final List<Avatar> THROTTLED = new ArrayList<>();
     private static final List<Avatar> DUE = new ArrayList<>();
@@ -391,7 +384,7 @@ public class AvatarCulling {
         for (Avatar avatar : TICK_THROTTLED) {
             if (avatar.tickScriptCost <= cap)
                 continue;
-            int interval = (int) Math.min(Math.ceil(avatar.tickScriptCost / cap), maxBudgetInterval(avatar, MAX_TICK_BUDGET_INTERVAL));
+            int interval = (int) Math.min(Math.ceil(avatar.tickScriptCost / cap), MAX_TICK_BUDGET_INTERVAL);
 
             // runs once every interval ticks on average, and keeps its own phase when the interval changes
             avatar.tickScriptCredit += 1d / interval;
@@ -415,6 +408,43 @@ public class AvatarCulling {
             avatar.tickScriptCost += (measured - avatar.tickScriptCost) * TICK_COST_SMOOTHING;
     }
 
+    // Crowd Pings Only: counts every other player within the avatar render distance, also the ones out of view, so turning the camera
+    // never changes it. Switches on at once; switches off only after the count has stayed low for a moment, so a player
+    // walking back and forth around the limit does not start and stop everyone's scripts
+    private static final long CROWD_SCRIPTS_RETURN_NANOS = 3_000_000_000L;
+    // read by the tick script workers
+    private static volatile boolean crowdPingsOnly;
+    private static long lastCrowdNanos;
+
+    public static boolean isCrowdPingsOnly() {
+        return crowdPingsOnly;
+    }
+
+    private static void updateCrowdScripts(ClientLevel level) {
+        int limit = Configs.CROWD_PINGS_ONLY.value;
+        if (limit <= 0) {
+            crowdPingsOnly = false;
+            return;
+        }
+
+        Player self = Minecraft.getInstance().player;
+        int maxDistance = Configs.AVATAR_RENDER_DISTANCE.value;
+        double maxDistanceSqr = (double) maxDistance * maxDistance;
+        int count = 0;
+        for (Player player : level.players()) {
+            if (player != self && (maxDistance <= 0 || player.distanceToSqr(camX, camY, camZ) <= maxDistanceSqr))
+                count++;
+        }
+
+        long now = System.nanoTime();
+        if (count >= limit) {
+            crowdPingsOnly = true;
+            lastCrowdNanos = now;
+        } else if (crowdPingsOnly && now - lastCrowdNanos >= CROWD_SCRIPTS_RETURN_NANOS) {
+            crowdPingsOnly = false;
+        }
+    }
+
     // the rendered avatars of other players, closest first
     // the host, camera, focused and full detail avatars are never part of it (the focused ones are the only ones not blocked while focus is on)
     private static void collectCrowd(ClientLevel level) {
@@ -432,19 +462,6 @@ public class AvatarCulling {
             avatar.crowdRank = 0;
         for (int i = 0; i < CROWD.size(); i++)
             CROWD.get(i).avatar().crowdRank = i;
-    }
-
-    // only the closest rendered avatars keep full detail, every next group of the same size loses one detail step
-    // so a crowd costs about the same no matter how close it is
-    private static void limitCrowdDetail() {
-        int full = Configs.FULL_DETAIL_AVATARS.value;
-        if (full <= 0)
-            return;
-
-        for (int i = full; i < CROWD.size(); i++) {
-            Avatar avatar = CROWD.get(i).avatar();
-            avatar.lodLevel = Math.max(avatar.lodLevel, Math.min(i / full, FiguraModelPartReader.LOD_LEVELS));
-        }
     }
 
     // only the closest players have their avatars drawn from the model every frame: the others alternate between a frame
@@ -502,7 +519,6 @@ public class AvatarCulling {
         int maxDistance = Configs.AVATAR_RENDER_DISTANCE.value;
         double maxDistanceSqr = (double) maxDistance * maxDistance;
         boolean viewCulling = Configs.AVATAR_VIEW_CULLING.value;
-        int lodDistance = Configs.AVATAR_LOD_DISTANCE.value;
 
         // first pass: focus, distance and camera view
         for (Avatar avatar : AVATARS) {
@@ -511,15 +527,10 @@ public class AvatarCulling {
 
             avatar.focusBlocked = !FOCUSED.isEmpty() && !exempt && !focused;
             avatar.culled = false;
-            avatar.lodLevel = 0;
             if (exempt || avatar.focusBlocked)
                 continue;
 
             Player player = level.getPlayerByUUID(avatar.owner);
-
-            // one detail step lost every lodDistance blocks
-            if (lodDistance > 0 && player != null && !FULL_DETAIL.contains(avatar.owner))
-                avatar.lodLevel = (int) Math.min(Math.sqrt(player.distanceToSqr(camX, camY, camZ)) / lodDistance, FiguraModelPartReader.LOD_LEVELS);
 
             if (focused)
                 continue;

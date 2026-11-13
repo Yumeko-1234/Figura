@@ -113,59 +113,7 @@ public class LocalAvatarLoader {
         async(() -> {
             try {
                 FiguraMod.debug("--- avatar compiling: " + target.id + " ---");
-                // load as folder
-                CompoundTag nbt = new CompoundTag();
-
-                // scripts
-                loadState = LoadState.SCRIPTS;
-                loadScripts(finalPath, nbt);
-
-                // custom sounds
-                loadState = LoadState.SOUNDS;
-                loadSounds(finalPath, nbt);
-
-                // metadata part 1
-                loadState = LoadState.METADATA1;
-                Path avatarJsonc = finalPath.resolve("avatar.jsonc");
-                Path avatarJson = finalPath.resolve("avatar.json");
-                String _meta;
-                if (Files.exists(avatarJsonc)) {
-                    _meta = IOUtils.readFile(avatarJsonc);
-                } else {
-                    _meta = IOUtils.readFile(avatarJson);
-                }
-                AvatarMetadataParser.Metadata metadata = AvatarMetadataParser.read(_meta);
-
-                CompoundTag metaNBT = AvatarMetadataParser.parse(metadata,_meta, IOUtils.getFileNameOrEmpty(finalPath));
-                nbt.put("metadata", metaNBT);
-                metaNBT.putString("uuid",target.id.toString());
-
-                // models
-                CompoundTag textures = new CompoundTag();
-                ListTag animations = new ListTag();
-                BlockbenchParser2 modelParser = new BlockbenchParser2();
-
-                loadState = LoadState.MODELS;
-                CompoundTag models = loadModels(finalPath, finalPath, modelParser, textures, animations, "", metadata.loadOptions);
-                models.putString("name", "models");
-
-                // apply customizations from metadata
-                loadState = LoadState.METADATA2;
-				AvatarMetadataParser.injectToModels(metadata, models);
-				AvatarMetadataParser.injectToTextures(metadata, textures);
-
-                // return :3
-                if (!models.isEmpty())
-                    nbt.put("models", models);
-                if (!textures.isEmpty())
-                    nbt.put("textures", textures);
-                if (!animations.isEmpty())
-                    nbt.put("animations", animations);
-                CompoundTag metadataTag = nbt.getCompound("metadata");
-                if (metadataTag.contains("resources_paths")) {
-                    loadResources(nbt, metadataTag.getList("resources_paths", Tag.TAG_STRING), finalPath);
-                    metadataTag.remove("resource_paths");
-                }
+                CompoundTag nbt = buildAvatar(finalPath, target.id);
 
                 // load
                 target.loadAvatar(nbt);
@@ -175,6 +123,66 @@ public class LocalAvatarLoader {
                 FiguraToast.sendToast(FiguraText.of("toast.load_error"), FiguraText.of("gui.load_error." + LocalAvatarLoader.getLoadState()), FiguraToast.ToastType.ERROR);
             }
         });
+    }
+
+    /**
+     * Builds the avatar in a folder into its nbt, on the calling thread
+     */
+    public static CompoundTag buildAvatar(Path finalPath, UUID owner) throws Exception {
+        // load as folder
+        CompoundTag nbt = new CompoundTag();
+
+        // scripts
+        loadState = LoadState.SCRIPTS;
+        loadScripts(finalPath, nbt);
+
+        // custom sounds
+        loadState = LoadState.SOUNDS;
+        loadSounds(finalPath, nbt);
+
+        // metadata part 1
+        loadState = LoadState.METADATA1;
+        Path avatarJsonc = finalPath.resolve("avatar.jsonc");
+        Path avatarJson = finalPath.resolve("avatar.json");
+        String _meta;
+        if (Files.exists(avatarJsonc)) {
+            _meta = IOUtils.readFile(avatarJsonc);
+        } else {
+            _meta = IOUtils.readFile(avatarJson);
+        }
+        AvatarMetadataParser.Metadata metadata = AvatarMetadataParser.read(_meta);
+
+        CompoundTag metaNBT = AvatarMetadataParser.parse(metadata,_meta, IOUtils.getFileNameOrEmpty(finalPath));
+        nbt.put("metadata", metaNBT);
+        metaNBT.putString("uuid",owner.toString());
+
+        // models
+        CompoundTag textures = new CompoundTag();
+        ListTag animations = new ListTag();
+        BlockbenchParser2 modelParser = new BlockbenchParser2();
+
+        loadState = LoadState.MODELS;
+        CompoundTag models = loadModels(finalPath, finalPath, modelParser, textures, animations, "", metadata.loadOptions);
+        models.putString("name", "models");
+
+        // apply customizations from metadata
+        loadState = LoadState.METADATA2;
+        AvatarMetadataParser.injectToModels(metadata, models);
+        AvatarMetadataParser.injectToTextures(metadata, textures);
+
+        // return :3
+        if (!models.isEmpty())
+            nbt.put("models", models);
+        if (!textures.isEmpty())
+            nbt.put("textures", textures);
+        if (!animations.isEmpty())
+            nbt.put("animations", animations);
+        CompoundTag metadataTag = nbt.getCompound("metadata");
+        if (metadataTag.contains("resources_paths")) {
+            loadResources(nbt, metadataTag.getList("resources_paths", Tag.TAG_STRING), finalPath);
+            metadataTag.remove("resource_paths");
+        }
+        return nbt;
     }
     private static void loadResources(CompoundTag nbt, ListTag pathsTag, Path parentPath) {
         ArrayList<PathMatcher> pathMatchers = new ArrayList<>();

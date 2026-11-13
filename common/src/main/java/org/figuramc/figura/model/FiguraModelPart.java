@@ -85,18 +85,6 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
 
     public final Map<Integer, List<Vertex>> vertices;
 
-    // reduced copies of the vertices, used when the avatar is far away (index 0 is detail level 1)
-    // null when the part was not reduced, or when a script got hold of the vertices (it may edit them)
-    public Lod[] lods;
-
-    // used by Simplify Avatar Bodies, see FiguraModelPartReader.computeSimplifyInfo
-    // lodKeep: part of the head, never simplified
-    // lodSize: largest side, in model pixels, of the box around this part and its children at rest (max value when unknown)
-    // lodFaces: faces of this part and its children, taken from the complexity when the part is skipped
-    public boolean lodKeep;
-    public float lodSize = Float.MAX_VALUE;
-    public int lodFaces;
-
     // box {minX, minY, minZ, maxX, maxY, maxZ} around the own vertices of this part, in model space, see getVertexBox
     private float[] vertexBox;
     private boolean vertexBoxComputed, verticesExposed;
@@ -258,33 +246,6 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         return verticesExposed;
     }
 
-    public static class Lod {
-        public final Map<Integer, List<Vertex>> vertices;
-        public final List<Integer> facesByTexture;
-        private float[][] packed;
-
-        public Lod(Map<Integer, List<Vertex>> vertices, List<Integer> facesByTexture) {
-            this.vertices = vertices;
-            this.facesByTexture = facesByTexture;
-        }
-
-        // packed copy of the vertices of texture i, see FiguraModelPart.pack
-        public float[] packed(int i) {
-            if (packed == null)
-                packed = new float[facesByTexture.size()][];
-            if (i >= packed.length)
-                return null;
-            float[] p = packed[i];
-            if (p == null) {
-                List<Vertex> list = vertices.get(i);
-                if (list == null)
-                    return null;
-                packed[i] = p = pack(list);
-            }
-            return p;
-        }
-    }
-
     @LuaWhitelist
     @LuaFieldDoc("model_part.pre_render")
     public LuaFunction preRender; // before calculations
@@ -322,28 +283,17 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     }
 
     public boolean pushVerticesImmediate(ImmediateAvatarRenderer avatarRenderer, int[] remainingComplexity) {
-        int level = avatarRenderer.lodLevel;
-        if (avatarRenderer.simplifyBody && !lodKeep)
-            level = Math.max(level, FiguraModelPartReader.SIMPLIFY_LOD_LEVEL);
-        Lod lod = level > 0 && lods != null ? lods[Math.min(level, lods.length) - 1] : null;
-
         List<Vertex>[] lists = vertexLists();
         for (int i = 0; i < facesByTexture.size(); i++) {
             if (remainingComplexity[0] <= 0)
                 return false;
-            // complexity always counts the full detail faces, so a distant avatar never shows more than a close one
             int faces = facesByTexture.get(i);
             // most parts only use a few of the avatar's textures
             if (faces == 0)
                 continue;
             remainingComplexity[0] -= faces;
-            // (a detail level may share the vertex objects of the part, so its packed copy is dropped with them)
-            if (lod != null && remainingComplexity[0] >= 0 && i < lod.facesByTexture.size()) {
-                avatarRenderer.pushFaces(lod.facesByTexture.get(i), faces, remainingComplexity, textures.get(i), lod.vertices.get(i), lod.packed(i), this);
-            } else {
-                int count = faces + Math.min(remainingComplexity[0], 0);
-                avatarRenderer.pushFaces(count, count, remainingComplexity, textures.get(i), lists[i], packedVertices(i), this);
-            }
+            int count = faces + Math.min(remainingComplexity[0], 0);
+            avatarRenderer.pushFaces(count, count, remainingComplexity, textures.get(i), lists[i], packedVertices(i), this);
         }
         return true;
     }
@@ -1676,7 +1626,6 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             value = "model_part.get_vertices"
     )
     public List<Vertex> getVertices(@LuaNotNil String textureID) {
-        lods = null;
         packedVertices = null;
         verticesExposed = true;
         int index = -1;
@@ -1692,7 +1641,6 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     @LuaWhitelist
     @LuaMethodDoc("model_part.get_all_vertices")
     public Map<String, List<Vertex>> getAllVertices() {
-        lods = null;
         packedVertices = null;
         verticesExposed = true;
         Map<String, List<Vertex>> map = new HashMap<>();

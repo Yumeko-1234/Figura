@@ -12,7 +12,6 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import org.figuramc.figura.FiguraMod;
@@ -45,11 +44,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     public static final FiguraMat4 VIEW_TO_WORLD_MATRIX = FiguraMat4.of();
     private static final PartCustomization pivotOffsetter = new PartCustomization();
     protected static final VertexBuffer VERTEX_BUFFER = new VertexBuffer();
-
-    // detail level used by the current render pass, 0 is full detail
-    public int lodLevel;
-    // if the current render pass skips small parts and uses less detail outside of the head (Simplify Avatar Bodies)
-    public boolean simplifyBody;
 
     // if the world pass and the pivots pass have anything to do, checked again when a script changes the model structure
     // these passes walk every part of the model, but most avatars have no world parts and are rarely invisible
@@ -118,7 +112,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // Vertex data, read model parts
         root = FiguraModelPartReader.read(avatar, avatar.nbt.getCompound("models"), textureSets, false);
-        FiguraModelPartReader.buildLods(avatar, root);
 
         sortParts();
     }
@@ -183,9 +176,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         doIrisEmissiveFix = (irisConfig >= 2 && ClientAPI.hasShaderPack()) || (avatar.renderMode != EntityRenderMode.RENDER && avatar.renderMode != EntityRenderMode.WORLD);
         offsetRenderLayers = irisConfig >= 1;
 
-        // reduced detail only for the avatar on its player in the world, never in the gui, first person or world parts
-        lodLevel = avatar.renderMode == EntityRenderMode.RENDER ? avatar.lodLevel : 0;
-
         // the render scripts of this avatar are skipped this frame, only for the player in the world and its world pass
         // or already ran in this frame's shadow pass, whose results this pass draws
         // smoothing only where the scripts are limited: the player in the world and its world pass (gui and first person run every frame)
@@ -197,13 +187,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // time limited avatars: each part runs its render functions once per cycle, spread over frames (partScriptsDue)
         cycledPartScripts = avatar.renderScriptInterval > 0
                 && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD);
-
-        // simplified body: the player in the world and the world pass (which walks every part looking for world parts)
-        // never the gui, first person, the host (unless enabled) or the focused players
-        simplifyBody = Configs.SIMPLIFY_AVATAR_BODIES.value && avatar.entityType == EntityType.PLAYER
-                && (avatar.renderMode == EntityRenderMode.RENDER || avatar.renderMode == EntityRenderMode.WORLD)
-                && (!avatar.isHost || Configs.BODY_LOD_SELF.value)
-                && !AvatarCulling.isFocused(avatar.owner) && !AvatarCulling.isFullDetail(avatar.owner);
 
         // custom textures (the atlas first, so the first upload of each texture already goes there)
         prepareAtlas();
@@ -519,14 +502,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return true;
         }
 
-        // simplified body: small parts are skipped as if they were hidden
-        if (simplifyBody && !part.lodKeep && part.lodSize < FiguraModelPartReader.SIMPLIFY_MIN_SIZE && !needsFullRender(part)) {
-            // the skipped faces still count, so a simplified avatar never shows more than the full one
-            remainingComplexity[0] -= part.lodFaces;
-            pop(2);
-            return part.lodFaces == 0 || remainingComplexity[0] > 0;
-        }
-
         // calculate part transforms
 
         // calculate vanilla parent
@@ -740,22 +715,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
     private void pop(int times) {
         if (profiling) FiguraMod.popProfiler(times);
-    }
-
-    // if the part or one of its children does more than drawing its own faces
-    // (scripts, render tasks, the head, or special parents like pivots and world parts), so it can't be skipped
-    // only called for small parts, which rarely have many children
-    private static boolean needsFullRender(FiguraModelPart part) {
-        ParentType type = part.parentType;
-        if (part.preRender != null || part.midRender != null || part.postRender != null || !part.renderTasks.isEmpty()
-                || type.isSeparate || type.isPivot || type.isRenderLayer
-                || type == ParentType.Head || type == ParentType.Skull || type == ParentType.Portrait)
-            return true;
-        for (FiguraModelPart child : part.children) {
-            if (needsFullRender(child))
-                return true;
-        }
-        return false;
     }
 
     protected void renderPivot(FiguraModelPart part, PartCustomization customization) {
@@ -1578,8 +1537,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         final FiguraMat4 root = FiguraMat4.of();
         final FiguraMat3 rootNormal = FiguraMat3.of();
         // the state of the pass, a replay must find the same
-        int lodLevel, structureVersion;
-        boolean simplifyBody, translucent, glowing, doIrisEmissiveFix, offsetRenderLayers;
+        int structureVersion;
+        boolean translucent, glowing, doIrisEmissiveFix, offsetRenderLayers;
         float alpha;
         int complexityUsed;
 
@@ -1601,7 +1560,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // if the kept frame is the last one and was drawn in the same state as the pass starting now
         boolean matches(ImmediateAvatarRenderer renderer) {
             return frame == Avatar.getLevelFrame() - 1
-                    && lodLevel == renderer.lodLevel && simplifyBody == renderer.simplifyBody
                     && translucent == renderer.translucent && glowing == renderer.glowing
                     && doIrisEmissiveFix == renderer.doIrisEmissiveFix && offsetRenderLayers == renderer.offsetRenderLayers
                     && structureVersion == renderer.structureVersion && alpha == renderer.alpha;
@@ -1611,8 +1569,6 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         void begin(ImmediateAvatarRenderer renderer, double vertOffset) {
             clear();
             renderer.rootMatrices(root, rootNormal, vertOffset);
-            lodLevel = renderer.lodLevel;
-            simplifyBody = renderer.simplifyBody;
             translucent = renderer.translucent;
             glowing = renderer.glowing;
             doIrisEmissiveFix = renderer.doIrisEmissiveFix;

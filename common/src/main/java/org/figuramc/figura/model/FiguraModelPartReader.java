@@ -119,7 +119,7 @@ public class FiguraModelPartReader {
             readMesh(facesByTexture, partCompound, vertices);
             customization.partType = PartCustomization.PartType.MESH;
             if (lodCell > 0f)
-                reduceMesh(facesByTexture, vertices, lodCell, true);
+                reduceMesh(facesByTexture, vertices, lodCell);
         }
 
         // smooth normals
@@ -615,7 +615,7 @@ public class FiguraModelPartReader {
     // vertex clustering: snaps every vertex to the average position of the grid cell it falls in,
     // then removes the faces that collapsed into a line or a point
     // each vertex keeps its own UV, so the texture is not smeared, only the shape is simplified
-    private static void reduceMesh(List<Integer> facesByTexture, Map<Integer, List<Vertex>> vertices, float cell, boolean updateNormals) {
+    private static void reduceMesh(List<Integer> facesByTexture, Map<Integer, List<Vertex>> vertices, float cell) {
         // average position of each cell
         Map<Long, float[]> cells = new HashMap<>();
         for (List<Vertex> list : vertices.values()) {
@@ -655,11 +655,6 @@ public class FiguraModelPartReader {
                     continue;
 
                 // the shape changed, so update the flat normal (same formula as readMesh)
-                // distant copies keep the original normals instead, so smooth shaded meshes stay smooth
-                if (!updateNormals) {
-                    kept.add(a); kept.add(b); kept.add(c); kept.add(d);
-                    continue;
-                }
                 float ux = c.x - b.x, uy = c.y - b.y, uz = c.z - b.z;
                 float vx = a.x - b.x, vy = a.y - b.y, vz = a.z - b.z;
                 float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
@@ -676,102 +671,6 @@ public class FiguraModelPartReader {
             entry.setValue(kept);
             facesByTexture.set(entry.getKey(), kept.size() / 4);
         }
-    }
-
-    // -- distance detail levels -- //
-
-    // grid size, in model pixels, of each distance detail level (level 1 is index 0)
-    private static final float[] DISTANCE_LOD_CELLS = {1f, 2f, 4f};
-    public static final int LOD_LEVELS = DISTANCE_LOD_CELLS.length;
-
-    // builds the reduced copies used when a player avatar is far away, see FiguraModelPart.lods
-    public static void buildLods(Avatar owner, FiguraModelPart root) {
-        if (owner.entityType == EntityType.PLAYER) {
-            buildLods(root);
-            computeSimplifyInfo(root, false);
-        }
-    }
-
-    // -- simplify avatar bodies -- //
-
-    // parts (with their children) smaller than this many model pixels are skipped
-    public static final float SIMPLIFY_MIN_SIZE = 2f;
-    // distance detail level always used by the simplified parts
-    public static final int SIMPLIFY_LOD_LEVEL = 2;
-
-    // fills lodKeep, lodSize and lodFaces, returns the box {minX, minY, minZ, maxX, maxY, maxZ} around the part and its children
-    // vertices are stored in model space at rest, so the boxes of children can be merged directly
-    private static float[] computeSimplifyInfo(FiguraModelPart part, boolean keep) {
-        ParentType type = part.parentType;
-        keep |= type == ParentType.Head || type == ParentType.Skull || type == ParentType.Portrait;
-        part.lodKeep = keep;
-
-        float[] box = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
-        for (List<Vertex> list : part.vertices.values()) {
-            for (Vertex v : list) {
-                box[0] = Math.min(box[0], v.x); box[1] = Math.min(box[1], v.y); box[2] = Math.min(box[2], v.z);
-                box[3] = Math.max(box[3], v.x); box[4] = Math.max(box[4], v.y); box[5] = Math.max(box[5], v.z);
-            }
-        }
-
-        int faces = countFaces(part.facesByTexture);
-        for (FiguraModelPart child : part.children) {
-            float[] childBox = computeSimplifyInfo(child, keep);
-            faces += child.lodFaces;
-            for (int i = 0; i < 3; i++) {
-                box[i] = Math.min(box[i], childBox[i]);
-                box[i + 3] = Math.max(box[i + 3], childBox[i + 3]);
-            }
-        }
-
-        part.lodFaces = faces;
-        // an empty group has no box, so it counts as size 0
-        part.lodSize = box[0] > box[3] ? 0f : Math.max(box[3] - box[0], Math.max(box[4] - box[1], box[5] - box[2]));
-        return box;
-    }
-
-    private static void buildLods(FiguraModelPart part) {
-        PartCustomization.PartType type = part.customization.partType;
-        if ((type == PartCustomization.PartType.CUBE || type == PartCustomization.PartType.MESH) && !part.vertices.isEmpty()) {
-            int fullFaces = countFaces(part.facesByTexture);
-            FiguraModelPart.Lod prev = new FiguraModelPart.Lod(part.vertices, part.facesByTexture);
-            FiguraModelPart.Lod[] lods = new FiguraModelPart.Lod[LOD_LEVELS];
-
-            for (int i = 0; i < LOD_LEVELS; i++) {
-                Map<Integer, List<Vertex>> vertices = new HashMap<>();
-                for (Map.Entry<Integer, List<Vertex>> entry : part.vertices.entrySet()) {
-                    List<Vertex> list = new ArrayList<>(entry.getValue().size());
-                    for (Vertex vertex : entry.getValue())
-                        list.add(vertex.copy());
-                    vertices.put(entry.getKey(), list);
-                }
-                List<Integer> faces = new ArrayList<>(part.facesByTexture);
-
-                float cell = DISTANCE_LOD_CELLS[i];
-                if (type == PartCustomization.PartType.CUBE)
-                    reduceCube(faces, vertices, cell / 2); // only drop cubes much smaller than the cell, so small details like eyes last longer
-                else
-                    reduceMesh(faces, vertices, cell, false);
-
-                // nothing more was removed, share the previous level instead of keeping another copy
-                if (countFaces(faces) >= countFaces(prev.facesByTexture))
-                    lods[i] = prev;
-                else
-                    lods[i] = prev = new FiguraModelPart.Lod(vertices, faces);
-            }
-
-            part.lods = countFaces(prev.facesByTexture) < fullFaces ? lods : null;
-        }
-
-        for (FiguraModelPart child : part.children)
-            buildLods(child);
-    }
-
-    private static int countFaces(List<Integer> facesByTexture) {
-        int count = 0;
-        for (Integer faces : facesByTexture)
-            count += faces;
-        return count;
     }
 
     private static long cellKey(Vertex v, float cell) {

@@ -382,6 +382,8 @@ public final class FiguraBenchmark {
         String otherScripts = System.getProperty("figura.benchmark.otherScripts");
         if (otherScripts != null)
             Configs.OTHER_AVATAR_SCRIPTS.value = Integer.parseInt(otherScripts);
+        // off unless asked for, so a crowd run still measures the scripts
+        Configs.CROWD_PINGS_ONLY.value = Integer.getInteger("figura.benchmark.crowdPingsOnly", 0);
         String parallelTicks = System.getProperty("figura.benchmark.parallelTicks");
         if (parallelTicks != null)
             Configs.PARALLEL_TICK_SCRIPTS.value = Boolean.parseBoolean(parallelTicks);
@@ -417,7 +419,8 @@ public final class FiguraBenchmark {
     // permission level like any other player's.
 
     private static void spawnCrowd(Minecraft mc) {
-        File[] files = new File(CROWD).listFiles((dir, name) -> name.endsWith(".nbt"));
+        // built avatars (.nbt) or avatar folders (with an avatar.json, built on load like a local avatar)
+        File[] files = new File(CROWD).listFiles((dir, name) -> name.endsWith(".nbt") || new File(dir, name + "/avatar.json").isFile());
         if (files == null || files.length == 0) {
             log("no avatars in the crowd folder " + CROWD);
             return;
@@ -444,11 +447,11 @@ public final class FiguraBenchmark {
             CROWD_PLAYERS.add(player);
             HEAD_STATS.add(new HeadStats());
             if (CROWD_AVATARS) try {
-                CompoundTag nbt = NbtIo.readCompressed(files[i]);
+                CompoundTag nbt = files[i].isDirectory() ? org.figuramc.figura.avatar.local.LocalAvatarLoader.buildAvatar(files[i].toPath(), id) : NbtIo.readCompressed(files[i]);
                 AvatarManager.setAvatar(id, nbt);
                 HEAD_STATS.get(i).name = files[i].getName() + (usesSmoothHead(nbt) ? " (smooth head script)" : "");
                 log("crowd " + i + ": " + HEAD_STATS.get(i).name);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 FiguraMod.LOGGER.error("[benchmark] could not read the avatar " + files[i], e);
             }
         }
@@ -492,6 +495,8 @@ public final class FiguraBenchmark {
         if (!CROWD_LOOK || CROWD_PLAYERS.isEmpty())
             return;
         crowdTicks++;
+        if (crowdTicks == 20 && EPIC_FIGHT_MODE)
+            toEpicFightMode();
         double t = crowdTicks / 20.0;
         for (int i = 0; i < CROWD_PLAYERS.size(); i++) {
             RemotePlayer p = CROWD_PLAYERS.get(i);
@@ -499,6 +504,28 @@ public final class FiguraBenchmark {
             float pitch = quantize(20 * (float) Math.sin(2 * Math.PI * t / 3 + i * 1.3));
             p.lerpHeadTo(yaw, 3);
             p.lerpTo(p.getX(), p.getY(), p.getZ(), yaw, pitch, 3, false);
+        }
+    }
+
+    // -Dfigura.benchmark.epicFightMode=true: the crowd in Epic Fight's battle mode (PlayerMode.EPICFIGHT) instead of vanilla mode
+    private static final boolean EPIC_FIGHT_MODE = Boolean.getBoolean("figura.benchmark.epicFightMode");
+
+    private static void toEpicFightMode() {
+        try {
+            Class<?> caps = Class.forName("yesman.epicfight.world.capabilities.EpicFightCapabilities");
+            java.lang.reflect.Method getPatch = caps.getMethod("getPlayerPatch", net.minecraft.world.entity.player.Player.class);
+            int n = 0;
+            for (RemotePlayer p : CROWD_PLAYERS) {
+                Object patch = getPatch.invoke(null, p);
+                if (patch == null)
+                    continue;
+                patch.getClass().getMethod("toEpicFightMode", boolean.class).invoke(patch, false);
+                if ((boolean) patch.getClass().getMethod("isEpicFightMode").invoke(patch))
+                    n++;
+            }
+            log("crowd in Epic Fight mode: " + n + "/" + CROWD_PLAYERS.size());
+        } catch (ReflectiveOperationException e) {
+            log("could not switch the crowd to Epic Fight mode: " + e);
         }
     }
 
@@ -531,6 +558,12 @@ public final class FiguraBenchmark {
                 if (avatar == null || avatar.renderer == null || avatar.renderer.root == null)
                     continue;
                 s.head = findHead(avatar.renderer.root);
+                if (s.head != null) {
+                    StringBuilder path = new StringBuilder(s.head.name);
+                    for (org.figuramc.figura.model.FiguraModelPart q = s.head.parent; q != null; q = q.parent)
+                        path.insert(0, q.name + ".");
+                    log("crowd " + i + " head part: " + path);
+                }
                 s.searched = true;
                 if (s.head == null)
                     continue;
@@ -545,7 +578,8 @@ public final class FiguraBenchmark {
             double tx = -Math.sin(yaw) * Math.cos(pitch), ty = -Math.sin(pitch), tz = Math.cos(yaw) * Math.cos(pitch);
             if (i == TRACE_HEAD && measuring && traced < 240) {
                 traced++;
-                log(String.format(Locale.ROOT, "trace %d pt=%.3f target yaw=%.2f pitch=%.2f drawn yaw=%.2f pitch=%.2f", traced, pt,
+                org.figuramc.figura.math.vector.FiguraVec3 sr = s.head.customization.getRot();
+                log(String.format(Locale.ROOT, "trace %d pt=%.3f script rot %.1f %.1f %.1f target yaw=%.2f pitch=%.2f drawn yaw=%.2f pitch=%.2f", traced, pt, sr.x, sr.y, sr.z,
                         Math.toDegrees(Math.atan2(-tx, tz)), Math.toDegrees(Math.asin(-ty)), Math.toDegrees(Math.atan2(-x, z)), Math.toDegrees(Math.asin(-y))));
             }
             if (s.hasLast && measuring) {
@@ -623,6 +657,16 @@ public final class FiguraBenchmark {
             jumps += s.jumps;
             error += s.errorSum;
         }
+        // what each avatar did to the vanilla head (most hide it in ENTITY_INIT), null = left as it is (shown)
+        StringBuilder vanilla = new StringBuilder("vanilla head visible (HEAD / PLAYER):");
+        for (int i = 0; i < CROWD_PLAYERS.size(); i++) {
+            org.figuramc.figura.avatar.Avatar avatar = AvatarManager.getLoadedAvatar(CROWD_PLAYERS.get(i).getUUID());
+            if (avatar == null || avatar.luaRuntime == null)
+                continue;
+            vanilla.append(String.format(Locale.ROOT, "%n    %-48s %s / %s", HEAD_STATS.get(i).name,
+                    avatar.luaRuntime.vanilla_model.HEAD.getVisible(), avatar.luaRuntime.vanilla_model.PLAYER.getVisible()));
+        }
+        log(vanilla.toString());
         log(String.format(Locale.ROOT, "heads: stalls %.2f%% jumps %.2f%% error %.3f deg/frame over %d avatar frames%s",
                 100.0 * stalls / Math.max(frames, 1), 100.0 * jumps / Math.max(frames, 1), error / Math.max(frames, 1), frames, sb));
     }

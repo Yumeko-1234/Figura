@@ -145,11 +145,8 @@ public class Configs {
     public static final ConfigType.PositiveIntConfig
             AVATAR_RENDER_DISTANCE = new ConfigType.PositiveIntConfig("avatar_render_distance", RENDERING, 32),
             CULLED_AVATAR_TICK_INTERVAL = new ConfigType.PositiveIntConfig("culled_avatar_tick_interval", RENDERING, 4),
-            AVATAR_LOD_DISTANCE = new ConfigType.PositiveIntConfig("avatar_lod_distance", RENDERING, 0),
             AVATAR_RENDER_SCRIPT_RATE = new ConfigType.PositiveIntConfig("avatar_render_script_rate", RENDERING, 60),
-            FULL_DETAIL_AVATARS = new ConfigType.PositiveIntConfig("full_detail_avatars", RENDERING, 0),
             FULL_RATE_ANIMATIONS = new ConfigType.PositiveIntConfig("full_rate_animations", RENDERING, 0),
-            FAR_SCRIPT_INTERVAL = new ConfigType.PositiveIntConfig("far_script_interval", RENDERING, 16),
             AVATAR_TEXTURE_SIZE = new ConfigType.PositiveIntConfig("avatar_texture_size", RENDERING, 1024) {
                 @Override
                 public void onChange() {
@@ -169,7 +166,6 @@ public class Configs {
             SPREAD_TICK_SCRIPTS = new ConfigType.BoolConfig("spread_tick_scripts", RENDERING, true),
             PARALLEL_TICK_SCRIPTS = new ConfigType.BoolConfig("parallel_tick_scripts", RENDERING, true),
             AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
-            SIMPLIFY_AVATAR_BODIES = new ConfigType.BoolConfig("simplify_avatar_bodies", RENDERING, false),
             CACHE_PART_MATRICES = new ConfigType.BoolConfig("cache_part_matrices", RENDERING, true),
             SHARE_SHADOW_PASS_SCRIPTS = new ConfigType.BoolConfig("share_shadow_pass_scripts", RENDERING, true),
             LUA_COMPILER = new ConfigType.BoolConfig("lua_compiler", RENDERING, true) {
@@ -182,6 +178,9 @@ public class Configs {
     // other players' avatars: 0 every script, 1 only pings (action wheel), 2 only the init script (see Avatar.scriptLevel)
     public static final ConfigType.EnumConfig
             OTHER_AVATAR_SCRIPTS = new ConfigType.EnumConfig("other_avatar_scripts", RENDERING, 0, 3);
+    // from this many other players around, Other Avatars' Scripts acts as at least Pings Only; 0 never (see AvatarCulling.updateCrowdScripts)
+    public static final ConfigType.PositiveIntConfig
+            CROWD_PINGS_ONLY = new ConfigType.PositiveIntConfig("crowd_pings_only", RENDERING, 40);
     public static final ConfigType.EnumConfig
             BODY_LOD = new ConfigType.EnumConfig("body_lod", RENDERING, 0, 4) {
                 @Override
@@ -381,10 +380,10 @@ public class Configs {
     // and their tooltip says so
     static {
         markFpsSettings(
-                OTHER_AVATAR_SCRIPTS, AVATAR_RENDER_SCRIPT_BUDGET, AVATAR_TICK_SCRIPT_BUDGET, AVATAR_RENDER_SCRIPT_RATE,
+                OTHER_AVATAR_SCRIPTS, CROWD_PINGS_ONLY, AVATAR_RENDER_SCRIPT_BUDGET, AVATAR_TICK_SCRIPT_BUDGET, AVATAR_RENDER_SCRIPT_RATE,
                 PARALLEL_TICK_SCRIPTS, LUA_COMPILER, SHARE_SHADOW_PASS_SCRIPTS, SPREAD_TICK_SCRIPTS,
                 AVATAR_RENDER_DISTANCE, AVATAR_VIEW_CULLING, CULLED_AVATAR_TICK_INTERVAL,
-                AVATAR_LOD_DISTANCE, BODY_LOD, SIMPLIFY_AVATAR_BODIES, FULL_DETAIL_AVATARS, FULL_RATE_ANIMATIONS
+                BODY_LOD, FULL_RATE_ANIMATIONS
         );
     }
 

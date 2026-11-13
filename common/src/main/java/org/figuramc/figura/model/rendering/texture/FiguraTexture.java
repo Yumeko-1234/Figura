@@ -301,6 +301,11 @@ public class FiguraTexture extends SimpleTexture {
     public void close() {
         // Make sure it doesn't close twice (minecraft tries to close the texture when reloading textures
         if (isClosed) return;
+        // only on the render thread, an upload there may be reading the images right now
+        if (!RenderSystem.isOnRenderThread()) {
+            RenderSystem.recordRenderCall(this::close);
+            return;
+        }
 
         isClosed = true;
 

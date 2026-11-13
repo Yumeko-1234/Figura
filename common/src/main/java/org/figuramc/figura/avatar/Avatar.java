@@ -140,8 +140,6 @@ public class Avatar {
     // set every frame by AvatarCulling
     // focusBlocked: another player is focused, culled: too far away or out of view
     public boolean focusBlocked, culled;
-    // detail level for the avatar on its player, 0 is full detail, higher the further away it is
-    public int lodLevel;
     // place among the visible players by distance to the camera (0: closest), see AvatarCulling
     public int crowdRank;
     // set every frame by AvatarCulling: the render scripts (render events and part render functions) are skipped this frame
@@ -387,11 +385,12 @@ public class Avatar {
     /**
      * Which scripts run (Other Avatars' Scripts): 0 all, 1 only the init script and pings, 2 only the init script.
      * The own avatar, focused players and full detail players always run all of them.
+     * In a crowd (Crowd Pings Only) it is at least 1, a stricter setting stays as it is.
      */
     public int scriptLevel() {
         if (isHost || AvatarCulling.isFocused(owner) || AvatarCulling.isFullDetail(owner))
             return 0;
-        return Configs.OTHER_AVATAR_SCRIPTS.value;
+        return Math.max(Configs.OTHER_AVATAR_SCRIPTS.value, AvatarCulling.isCrowdPingsOnly() ? 1 : 0);
     }
 
     public void runPing(int id, byte[] data) {
@@ -433,7 +432,10 @@ public class Avatar {
         flushQueuedEvents();
 
         // no events and part render functions with Other Avatars' Scripts below All (pings run by themselves, see runPing)
-        if (scriptError || luaRuntime == null || !loaded || scriptLevel() > 0 || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
+        // except ENTITY_INIT: it runs once, when the avatar first finds its entity, and is part of setting the avatar up
+        // (avatars hide the vanilla model there), so skipping it would show the vanilla model under theirs for good
+        if (scriptError || luaRuntime == null || !loaded || (scriptLevel() > 0 && !"ENTITY_INIT".equals(toRun))
+                || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
             return null;
 
         // run event, timing the render scripts
