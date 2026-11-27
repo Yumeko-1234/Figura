@@ -205,10 +205,20 @@ public final class FiguraBenchmark {
 
     // avatar batches drawn from their own texture instead of the avatar atlas, by reason: batches and vertices
     private static final java.util.Map<String, long[]> STANDALONE = new java.util.TreeMap<>();
+    // parallel model walks: started, not started (why), finished early (where) or at the end of the entities, with the render thread wait
+    private static final java.util.Map<String, long[]> WALKS = new java.util.TreeMap<>();
+
+    public static synchronized void onWalk(String what, long waitNanos) {
+        if (!measuring)
+            return;
+        long[] c = WALKS.computeIfAbsent(what, k -> new long[2]);
+        c[0]++;
+        c[1] += waitNanos;
+    }
 
     private static final java.util.Set<String> UVS_OUTSIDE_LOGGED = new java.util.HashSet<>();
 
-    public static void onUvsOutside(int w, int h, float[] bounds, double tu, double tv, boolean uvMatrix, String part) {
+    public static synchronized void onUvsOutside(int w, int h, float[] bounds, double tu, double tv, boolean uvMatrix, String part) {
         if (!measuring || !UVS_OUTSIDE_LOGGED.add(part) || UVS_OUTSIDE_LOGGED.size() > 40)
             return;
         log(String.format(Locale.ROOT, "uvs outside: part %s texture %dx%d uv px [%.2f %.2f .. %.2f %.2f] corner %.4f %.4f uvMatrix=%s",
@@ -235,12 +245,12 @@ public final class FiguraBenchmark {
             sentVertices += vertices;
     }
 
-    public static void onStripped(int vertices) {
+    public static synchronized void onStripped(int vertices) {
         if (measuring)
             strippedVertices += vertices;
     }
 
-    public static void onStandalone(String reason, int vertices) {
+    public static synchronized void onStandalone(String reason, int vertices) {
         if (!measuring)
             return;
         long[] c = STANDALONE.computeIfAbsent(reason, k -> new long[2]);
@@ -307,7 +317,7 @@ public final class FiguraBenchmark {
     }
 
     // every avatar model pass (ImmediateAvatarRenderer.render / renderSpecialParts), part render functions included
-    public static void onAvatarDraw(long nanos) {
+    public static synchronized void onAvatarDraw(long nanos) {
         if (measuring)
             avatarDrawNanos += nanos;
     }
@@ -716,6 +726,9 @@ public final class FiguraBenchmark {
         StringBuilder standalone = new StringBuilder();
         STANDALONE.forEach((k, v) -> standalone.append(String.format(Locale.ROOT, " %s=%.1f batches %.0f vertices", k, v[0] / (double) Math.max(countedFrames, 1), v[1] / (double) Math.max(countedFrames, 1))));
         log("not from the atlas, per frame:" + standalone);
+        StringBuilder walks = new StringBuilder();
+        WALKS.forEach((k, v) -> walks.append(String.format(Locale.ROOT, " %s=%.1f/frame wait %.3fms/frame", k, v[0] / (double) Math.max(countedFrames, 1), v[1] / 1e6 / Math.max(countedFrames, 1))));
+        log("parallel walks:" + walks);
         log(String.format(Locale.ROOT, "vertices sent: %.0f per frame, empty quads not sent: %.0f per frame, passes written by workers: %d of %d", sentVertices / (double) Math.max(countedFrames, 1), strippedVertices / (double) Math.max(countedFrames, 1), parallelConsumes, consumes));
         StringBuilder kinds = new StringBuilder();
         LUA_BY_KIND.forEach((k, v) -> kinds.append(String.format(Locale.ROOT, " %s=%.1fms/s x%d/s", k, v[0] / 1e6 / seconds, Math.round(v[1] / seconds))));

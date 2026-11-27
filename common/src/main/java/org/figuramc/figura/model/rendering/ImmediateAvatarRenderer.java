@@ -42,8 +42,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     protected final PartCustomization.PartCustomizationStack customizationStack = new PartCustomization.PartCustomizationStack();
 
     public static final FiguraMat4 VIEW_TO_WORLD_MATRIX = FiguraMat4.of();
-    private static final PartCustomization pivotOffsetter = new PartCustomization();
-    protected static final VertexBuffer VERTEX_BUFFER = new VertexBuffer();
+    // per renderer, model walks of different avatars run side by side on the workers (Parallel Model Walks)
+    private final PartCustomization pivotOffsetter = new PartCustomization();
+    protected final VertexBuffer vertexBuffer = new VertexBuffer();
+    // VIEW_TO_WORLD_MATRIX as it was when this pass started, the walk reads this copy
+    private final FiguraMat4 viewToWorld = FiguraMat4.of();
 
     // if the world pass and the pivots pass have anything to do, checked again when a script changes the model structure
     // these passes walk every part of the model, but most avatars have no world parts and are rarely invisible
@@ -96,6 +99,292 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private final VertexData primaryData = new VertexData(), secondaryData = new VertexData();
     private final FiguraVec3 pivotScratch = FiguraVec3.of();
     private final BlockPos.MutableBlockPos lightPos = new BlockPos.MutableBlockPos();
+
+    // -- parallel model walks -- //
+    // The model pass of another player in the world: its walk (transforms, part render functions, collecting the vertices) runs on a
+    // worker while the render thread goes on with the next entities, and the render thread draws what it collected once it is done.
+    // That is as soon as anything else needs the avatar (its next pass, its scripts, the held item and armor pivots of its player,
+    // see Avatar.awaitRenderJob), and at the latest after the last entity of the level (finishParallelWalks), before the entity
+    // batches are drawn. Part render functions run on the worker too: their calls into the game wait for the render thread to
+    // wait for a walk (FiguraWorkers.LOCK), the ones on model parts, vectors and matrices don't.
+
+    // turned off with -Dfigura.parallelWalks=false, or the Parallel Model Walks setting
+    private static final boolean PARALLEL_WALKS = !"false".equalsIgnoreCase(System.getProperty("figura.parallelWalks"));
+    // true while finishParallelWalks draws them (benchmark statistics)
+    private static boolean finishingAll;
+
+    // benchmark statistics: what asked for a walk to be finished before the end of the entities
+    private static String earlyCaller() {
+        for (StackTraceElement e : new Throwable().getStackTrace()) {
+            String c = e.getClassName();
+            if (c.contains("ImmediateAvatarRenderer") || c.endsWith("AvatarRenderer") || (c.endsWith(".Avatar") && e.getMethodName().equals("awaitRenderJob")))
+                continue;
+            return c.substring(c.lastIndexOf('.') + 1) + "." + e.getMethodName();
+        }
+        return "?";
+    }
+
+    // the walks handed out and not finished yet this frame, in order (render thread only)
+    private static final List<ParallelWalk> PENDING_WALKS = new ArrayList<>();
+    // between the start of the level render and its last entity: the only time a walk may be handed out (render thread only)
+    private static boolean levelEntities;
+    // figura_extra_fight poses parts on Epic Fight joints from a thread local set around the avatar render, the walk sets it too
+    private static final ThreadLocal<Object> EF_MATRIX_CONTEXT = efMatrixContext();
+
+    // fixed for a pass, see commonRender
+    private boolean renderPivotsThisPass;
+    private boolean passIgnoreVanillaVisibility, passAllowHiddenTransforms, passAllowMatrixUpdate, passAllowPivotParts;
+    private float passTickDelta;
+    private String partScriptContext;
+    // while a walk runs for the workers: render tasks and standalone textures are kept for the render thread
+    private boolean deferring;
+    private ResourceLocation[] walkPlayerTextures;
+    private final List<DeferredTask> deferredTasks = new ArrayList<>();
+    private final List<PartCustomization> deferredTaskParents = new ArrayList<>();
+    private final List<FiguraTexture> deferredStandalone = new ArrayList<>();
+
+    private record DeferredTask(RenderTask task, PartCustomization parent, int light, int overlay) {}
+
+    @SuppressWarnings("unchecked")
+    private static ThreadLocal<Object> efMatrixContext() {
+        try {
+            java.lang.reflect.Field field = Class.forName("com.mikihina.figuraextrafight.compat.FiguraMatrixBridge").getDeclaredField("CONTEXT");
+            field.setAccessible(true);
+            return (ThreadLocal<Object>) field.get(null);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    // called when the level render starts
+    public static void beginLevelEntities() {
+        finishParallelWalks();
+        levelEntities = true;
+    }
+
+    /**
+     * Draws every walk handed out this frame, waiting for the ones still running. Called after the last entity of the level,
+     * before the entity batches are drawn, and again at the end of the level render.
+     */
+    public static void finishParallelWalks() {
+        finishParallelWalks(null);
+    }
+
+    // site: which hook calls it, for the benchmark statistics (null: not counted)
+    public static void finishParallelWalks(String site) {
+        levelEntities = false;
+        if (site != null && !PENDING_WALKS.isEmpty() && org.figuramc.figura.benchmark.FiguraBenchmark.measuring)
+            org.figuramc.figura.benchmark.FiguraBenchmark.onWalk("drawnAt:" + site, 0);
+        if (PENDING_WALKS.isEmpty()) {
+            FiguraWorkers.releaseRenderThreadHold();
+            return;
+        }
+        RuntimeException error = null;
+        try {
+            finishingAll = true;
+            for (int i = 0; i < PENDING_WALKS.size(); i++) {
+                try {
+                    PENDING_WALKS.get(i).finish();
+                } catch (RuntimeException e) {
+                    if (error == null)
+                        error = e;
+                }
+            }
+        } finally {
+            PENDING_WALKS.clear();
+            finishingAll = false;
+            FiguraWorkers.releaseRenderThreadHold();
+        }
+        if (error != null)
+            throw error;
+    }
+
+    private boolean canWalkInParallel() {
+        String blocker = walkBlocker();
+        if (org.figuramc.figura.benchmark.FiguraBenchmark.measuring && avatar.renderMode == EntityRenderMode.RENDER
+                && currentFilterScheme == PartFilterScheme.MODEL)
+            org.figuramc.figura.benchmark.FiguraBenchmark.onWalk(blocker == null ? "started" : "serial:" + blocker, 0);
+        return blocker == null;
+    }
+
+    // why this pass is walked on the render thread, null when it can go to the workers
+    private String walkBlocker() {
+        if (!PARALLEL_WALKS || !Configs.PARALLEL_MODEL_WALKS.value || !FiguraWorkers.available()) return "off";
+        if (!levelEntities) return "notLevelEntities";
+        if (avatar.renderMode != EntityRenderMode.RENDER || currentFilterScheme != PartFilterScheme.MODEL) return "pass";
+        if (avatar.isHost && !org.figuramc.figura.benchmark.FiguraBenchmark.HOST_AS_OTHER) return "host";
+        if (profiling || renderPivotsThisPass || capturing || trackWorldBounds) return "debugOrReplay";
+        if (translucent || glowing) return "translucentOrGlowing";
+        if (UIHelper.paperdoll || !com.mojang.blaze3d.systems.RenderSystem.isOnRenderThread()) return "gui";
+        if (!IrisCompat.isLevelBufferSource(bufferSource)) return "bufferSource:" + bufferSource.getClass().getSimpleName();
+        if (IrisCompat.isShadowPass()) return "shadow";
+        return null;
+    }
+
+    private void startParallelWalk(double vertOffset, int prevComplexity, int[] remainingComplexity) {
+        // looking the skin up may start loading it, so it is done here
+        walkPlayerTextures = FiguraTextureSet.playerTextures(avatar.owner);
+        // what the layers after the model ask for while the walk is out (see mayHaveParentType)
+        refreshParentTypes();
+        deferring = true;
+        ParallelWalk walk = new ParallelWalk(vertOffset, prevComplexity, remainingComplexity);
+        PENDING_WALKS.add(walk);
+        walk.task = FiguraWorkers.submit(walk::run);
+        avatar.renderJob = walk;
+    }
+
+    /**
+     * A model walk handed to the workers, see startParallelWalk.
+     */
+    public final class ParallelWalk {
+        private final double vertOffset;
+        private final int prevComplexity;
+        private final int[] remainingComplexity;
+        // what the walk and the drawing need from the entity render the walk was started in
+        private final Object efContext = EF_MATRIX_CONTEXT == null ? null : EF_MATRIX_CONTEXT.get();
+        private final int irisEntity = IrisCompat.currentEntity();
+        private volatile FiguraWorkers.Task task;
+        private volatile Thread runner;
+        // the post render event, run by the walk once it is done (runAfter)
+        private final java.util.concurrent.atomic.AtomicReference<Object> after = new java.util.concurrent.atomic.AtomicReference<>();
+        // render thread only
+        private boolean finished;
+
+        private ParallelWalk(double vertOffset, int prevComplexity, int[] remainingComplexity) {
+            this.vertOffset = vertOffset;
+            this.prevComplexity = prevComplexity;
+            this.remainingComplexity = remainingComplexity;
+        }
+
+        // has the walk run r right after it is done, false (r not taken) when it is done already
+        public boolean runAfter(Runnable r) {
+            return after.compareAndSet(null, r);
+        }
+
+        // if the calling thread is running this walk (its part render functions call back into the avatar)
+        public boolean isRunningHere() {
+            return runner == Thread.currentThread();
+        }
+
+        private void run() {
+            runner = Thread.currentThread();
+            Object prevContext = null;
+            if (EF_MATRIX_CONTEXT != null) {
+                prevContext = EF_MATRIX_CONTEXT.get();
+                if (efContext != null)
+                    EF_MATRIX_CONTEXT.set(efContext);
+                else
+                    EF_MATRIX_CONTEXT.remove();
+            }
+            try {
+                walkParts(vertOffset, remainingComplexity);
+                if (after.getAndSet(Boolean.TRUE) instanceof Runnable post)
+                    post.run();
+            } finally {
+                after.set(Boolean.TRUE);
+                if (EF_MATRIX_CONTEXT != null) {
+                    if (prevContext != null)
+                        EF_MATRIX_CONTEXT.set(prevContext);
+                    else
+                        EF_MATRIX_CONTEXT.remove();
+                }
+                runner = null;
+            }
+        }
+
+        /**
+         * Waits for the walk and draws what it collected. From another thread than the render thread it only waits,
+         * the render thread draws it later.
+         */
+        public void finish() {
+            if (!com.mojang.blaze3d.systems.RenderSystem.isOnRenderThread()) {
+                task.await(false);
+                return;
+            }
+            finishWalk(this);
+        }
+    }
+
+    // render thread only
+    private void finishWalk(ParallelWalk walk) {
+        if (walk.finished)
+            return;
+        walk.finished = true;
+        long start = System.nanoTime();
+        boolean wasDone = walk.task.isDone();
+        Throwable error = walk.task.await();
+        if (org.figuramc.figura.benchmark.FiguraBenchmark.measuring)
+            org.figuramc.figura.benchmark.FiguraBenchmark.onWalk((finishingAll ? "atEnd" : "early:" + earlyCaller()) + (wasDone ? ":done" : ":waited"), System.nanoTime() - start);
+        if (avatar.renderJob == walk)
+            avatar.renderJob = null;
+        deferring = false;
+        walkPlayerTextures = null;
+
+        try {
+            if (error != null) {
+                customizationStack.clear();
+                vertexBuffer.discard();
+                if (error instanceof RuntimeException re)
+                    throw re;
+                if (error instanceof Error err)
+                    throw err;
+                throw new RuntimeException(error);
+            }
+
+            for (FiguraTexture texture : deferredStandalone)
+                texture.requestStandalone();
+
+            // the vertices get the entity id of their player, as when they are written during its render
+            int prevEntity = IrisCompat.swapCurrentEntity(walk.irisEntity);
+            try {
+                drawDeferredTasks();
+                drawWalked();
+            } finally {
+                IrisCompat.restoreCurrentEntity(prevEntity);
+            }
+            checkEmpty();
+            avatar.complexity.use(walk.prevComplexity - Math.max(walk.remainingComplexity[0], 0));
+        } finally {
+            deferredStandalone.clear();
+            deferredTasks.clear();
+            this.isRendering = false;
+            if (this.dirty)
+                clean();
+            if (org.figuramc.figura.benchmark.FiguraBenchmark.measuring)
+                org.figuramc.figura.benchmark.FiguraBenchmark.onAvatarDraw(System.nanoTime() - start);
+        }
+    }
+
+    // keeps a render task of a walk on a worker, with a copy of the transform it is drawn with
+    private void deferTask(RenderTask task, PartCustomization parent, int light, int overlay) {
+        int index = deferredTasks.size();
+        if (index == deferredTaskParents.size())
+            deferredTaskParents.add(new PartCustomization());
+        PartCustomization copy = deferredTaskParents.get(index);
+        parent.copyTo(copy);
+        deferredTasks.add(new DeferredTask(task, copy, light, overlay));
+    }
+
+    // draws the render tasks kept by the walk, before its vertices like the walk on the render thread does
+    private void drawDeferredTasks() {
+        if (deferredTasks.isEmpty())
+            return;
+        FiguraMod.pushProfiler("renderTasks");
+        interceptRendersIntoFigura = false;
+        try {
+            for (DeferredTask deferred : deferredTasks) {
+                customizationStack.push(deferred.parent());
+                try {
+                    deferred.task().render(customizationStack, bufferSource, deferred.light(), deferred.overlay());
+                } finally {
+                    customizationStack.pop();
+                }
+            }
+        } finally {
+            interceptRendersIntoFigura = true;
+            FiguraMod.popProfiler();
+        }
+    }
 
     // light of the last block sampled this pass, most parts of an avatar sit in the same one or two blocks
     private int lastLightX, lastLightY, lastLightZ, lastLight;
@@ -155,6 +444,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // world matrices
         VIEW_TO_WORLD_MATRIX.set(AvatarRenderer.worldToViewMatrix().invert());
+        viewToWorld.set(VIEW_TO_WORLD_MATRIX);
 
         // calculate each part matrices
         calculatePartMatrices(root);
@@ -222,12 +512,22 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // world matrices
         if (allowMatrixUpdate)
             VIEW_TO_WORLD_MATRIX.set(AvatarRenderer.worldToViewMatrix().invert());
+        viewToWorld.set(VIEW_TO_WORLD_MATRIX);
 
         // complexity
         int prev = avatar.complexity.remaining;
         int[] remainingComplexity = new int[] {prev};
         hasLastLight = false;
         primaryData.cacheValid = secondaryData.cacheValid = false;
+        // what the part walk reads, fixed for the pass: the render thread changes the shared values while a walk runs on a worker
+        renderPivotsThisPass = shouldRenderPivots > 0;
+        partScriptContext = avatar.scriptContext();
+        // mods set some of these around the render call and back right after (figura_extra_fight: ignoreVanillaVisibility)
+        passIgnoreVanillaVisibility = ignoreVanillaVisibility;
+        passAllowHiddenTransforms = allowHiddenTransforms;
+        passAllowMatrixUpdate = allowMatrixUpdate;
+        passAllowPivotParts = allowPivotParts;
+        passTickDelta = tickDelta;
 
         trackWorldBounds = currentFilterScheme == PartFilterScheme.WORLD && allowMatrixUpdate;
         if (trackWorldBounds) {
@@ -237,56 +537,14 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // render all model parts
         if (root.customization.visible && !canSkipPass()) {
-            if (currentFilterScheme.parentType.isSeparate) {
-                List<FiguraModelPart> parts = separatedParts.get(currentFilterScheme.parentType);
-                if (parts != null) {
-                    boolean renderLayer = !currentFilterScheme.parentType.isRenderLayer;
-                    if (renderLayer) {
-                        PartCustomization customization = setupRootCustomization(vertOffset);
-                        customizationStack.push(customization); // push root
-                        customizationStack.push(root.customization); // push "models"
-                    }
-
-                    for (FiguraModelPart part : parts) {
-                        if (currentFilterScheme.parentType == ParentType.Item && part != itemToRender)
-                            continue;
-
-                        boolean saved = part.savedCustomization != null;
-                        if (saved) {
-                            customizationStack.push(part.savedCustomization);
-                            part.savedCustomization = null;
-                        }
-
-                        renderPart(part, remainingComplexity, currentFilterScheme.initialValue);
-
-                        if (saved) customizationStack.pop();
-                    }
-
-                    if (renderLayer) {
-                        customizationStack.pop(); // pop "models"
-                        customizationStack.pop(); // pop root
-                    }
-                }
-            } else {
-                PartCustomization customization = setupRootCustomization(vertOffset);
-                customizationStack.push(customization);
-                renderPart(root, remainingComplexity, currentFilterScheme.initialValue);
-                customizationStack.pop();
+            // other players' models are walked on a worker while the render thread goes on with the next entities, see ParallelWalk
+            if (canWalkInParallel()) {
+                startParallelWalk(vertOffset, prev, remainingComplexity);
+                return 0;
             }
 
-            // push vertices to vertex consumer
-            FiguraMod.pushProfiler("draw");
-            FiguraMod.pushProfiler("primary");
-            // own Iris group, so the avatar render types don't tie the vanilla ones into ordering cycles
-            int irisGroup = IrisCompat.beginAvatarGroup(bufferSource);
-            try {
-                VERTEX_BUFFER.consume(true, bufferSource, capturing ? frameCache : null);
-                FiguraMod.popPushProfiler("secondary");
-                VERTEX_BUFFER.consume(false, bufferSource, capturing ? frameCache : null);
-            } finally {
-                IrisCompat.endAvatarGroup(bufferSource, irisGroup);
-            }
-            FiguraMod.popProfiler(2);
+            walkParts(vertOffset, remainingComplexity);
+            drawWalked();
 
             // finish rendering
             checkEmpty();
@@ -314,6 +572,62 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             clean();
 
         return prev - Math.max(remainingComplexity[0], 0);
+    }
+
+    // the part walk of a pass: transforms, part render functions, and the vertices, render tasks and pivots it collects
+    private void walkParts(double vertOffset, int[] remainingComplexity) {
+        if (currentFilterScheme.parentType.isSeparate) {
+            List<FiguraModelPart> parts = separatedParts.get(currentFilterScheme.parentType);
+            if (parts != null) {
+                boolean renderLayer = !currentFilterScheme.parentType.isRenderLayer;
+                if (renderLayer) {
+                    PartCustomization customization = setupRootCustomization(vertOffset);
+                    customizationStack.push(customization); // push root
+                    customizationStack.push(root.customization); // push "models"
+                }
+
+                for (FiguraModelPart part : parts) {
+                    if (currentFilterScheme.parentType == ParentType.Item && part != itemToRender)
+                        continue;
+
+                    boolean saved = part.savedCustomization != null;
+                    if (saved) {
+                        customizationStack.push(part.savedCustomization);
+                        part.savedCustomization = null;
+                    }
+
+                    renderPart(part, remainingComplexity, currentFilterScheme.initialValue);
+
+                    if (saved) customizationStack.pop();
+                }
+
+                if (renderLayer) {
+                    customizationStack.pop(); // pop "models"
+                    customizationStack.pop(); // pop root
+                }
+            }
+        } else {
+            PartCustomization customization = setupRootCustomization(vertOffset);
+            customizationStack.push(customization);
+            renderPart(root, remainingComplexity, currentFilterScheme.initialValue);
+            customizationStack.pop();
+        }
+    }
+
+    // hands the vertices the walk collected to the buffer source, render thread only
+    private void drawWalked() {
+        FiguraMod.pushProfiler("draw");
+        FiguraMod.pushProfiler("primary");
+        // own Iris group, so the avatar render types don't tie the vanilla ones into ordering cycles
+        int irisGroup = IrisCompat.beginAvatarGroup(bufferSource);
+        try {
+            vertexBuffer.consume(avatar, true, bufferSource, capturing ? frameCache : null);
+            FiguraMod.popPushProfiler("secondary");
+            vertexBuffer.consume(avatar, false, bufferSource, capturing ? frameCache : null);
+        } finally {
+            IrisCompat.endAvatarGroup(bufferSource, irisGroup);
+        }
+        FiguraMod.popProfiler(2);
     }
 
     // the world and pivots passes only draw world or pivot parts, but they still run the part render functions
@@ -511,7 +825,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         // visibility
         popPush("checkVanillaVisible");
-        if (!ignoreVanillaVisibility && custom.vanillaVisible != null && !custom.vanillaVisible) {
+        if (!passIgnoreVanillaVisibility && custom.vanillaVisible != null && !custom.vanillaVisible) {
             popPush("removeVanillaTransforms");
             part.resetVanillaTransforms();
             pop(2);
@@ -524,7 +838,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // pre render function
         if (part.preRender != null && runScripts) {
             popPush("preRenderFunction");
-            avatar.run(part.preRender, avatar.render, tickDelta, avatar.scriptContext(), part);
+            avatar.run(part.preRender, avatar.render, passTickDelta, partScriptContext, part);
         }
 
         // recalculate stuff
@@ -542,7 +856,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // void blocked matrices
         // that's right, check only for previous predicate
         // (the copies are restored right after the push, before any children, so one scratch copy is enough)
-        boolean voidMatrices = !allowHiddenTransforms && !prevPredicate;
+        boolean voidMatrices = !passAllowHiddenTransforms && !prevPredicate;
         if (voidMatrices) {
             popPush("clearMatrices");
             voidedPosition.set(custom.positionMatrix);
@@ -568,7 +882,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         if (thisPassedPredicate) {
             // recalculate world matrices
             popPush("worldMatrices");
-            if (allowMatrixUpdate) {
+            if (passAllowMatrixUpdate) {
                 FiguraMat4 mat = partToWorldMatrices(custom);
                 part.savedPartToWorldMat.set(mat);
             }
@@ -602,7 +916,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // mid render function
         if (part.midRender != null && runScripts) {
             popPush("midRenderFunction");
-            avatar.run(part.midRender, avatar.render, tickDelta, avatar.scriptContext(), part);
+            avatar.run(part.midRender, avatar.render, passTickDelta, partScriptContext, part);
         }
 
         // render this
@@ -614,9 +928,9 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // render extras
         popPush("extras");
         if (!breakRender && thisPassedPredicate) {
-            boolean renderPivot = shouldRenderPivots > 0;
+            boolean renderPivot = renderPivotsThisPass;
             boolean renderTasks = !part.renderTasks.isEmpty();
-            boolean renderPivotParts = part.parentType.isPivot && allowPivotParts;
+            boolean renderPivotParts = part.parentType.isPivot && passAllowPivotParts;
 
             if (renderPivot || renderTasks || renderPivotParts) {
                 // fix light and overlay
@@ -650,7 +964,11 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                         if (neededComplexity > remainingComplexity[0])
                             break;
                         push(task.getName());
-                        task.render(customizationStack, bufferSource, light, overlay);
+                        // a walk on a worker keeps the task, it draws straight into the buffer source (render thread only)
+                        if (deferring)
+                            deferTask(task, peek, light, overlay);
+                        else
+                            task.render(customizationStack, bufferSource, light, overlay);
                         if (trackWorldBounds)
                             includeTaskBounds(peek, task);
                         if (capturing)
@@ -690,7 +1008,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         // post render function
         if (part.postRender != null && runScripts) {
             popPush("postRenderFunction");
-            avatar.run(part.postRender, avatar.render, tickDelta, avatar.scriptContext(), part);
+            avatar.run(part.postRender, avatar.render, passTickDelta, partScriptContext, part);
         }
 
         // pop
@@ -744,7 +1062,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     protected FiguraMat4 partToWorldMatrices(PartCustomization cust) {
         FiguraMat4 customizePeek = worldMatrix;
         customizePeek.set(customizationStack.peek().positionMatrix);
-        customizePeek.multiply(VIEW_TO_WORLD_MATRIX);
+        customizePeek.multiply(viewToWorld);
         FiguraVec3 piv = cust.getPivot(pivotScratch, false);
         // same as multiplying by a translation matrix on the right, only the last column changes
         customizePeek.translateFirst(piv.x, piv.y, piv.z);
@@ -762,7 +1080,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         FiguraMat4 m = boundsMatrix;
         m.set(customizationStack.peek().positionMatrix);
-        m.multiply(VIEW_TO_WORLD_MATRIX);
+        m.multiply(viewToWorld);
         for (int i = 0; i < 8; i++)
             includePoint(m, box[(i & 1) == 0 ? 0 : 3], box[(i & 2) == 0 ? 1 : 4], box[(i & 4) == 0 ? 2 : 5]);
     }
@@ -771,7 +1089,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private void includeTaskBounds(PartCustomization parent, RenderTask task) {
         FiguraMat4 m = boundsMatrix;
         m.set(parent.positionMatrix);
-        m.multiply(VIEW_TO_WORLD_MATRIX);
+        m.multiply(viewToWorld);
         FiguraMat4 t = task.getRenderedMatrix();
         includePoint(m, t.v14, t.v24, t.v34);
     }
@@ -900,7 +1218,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return ret;
 
         // get texture
-        ResourceLocation id = textureSet.getOverrideTexture(avatar.owner, texture);
+        ResourceLocation id = textureSet.getOverrideTexture(avatar.owner, texture, deferring, walkPlayerTextures);
 
         // color
         ret.color = primary ? customization.color : customization.color2;
@@ -1013,21 +1331,26 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
 
         RenderType renderType;
         AvatarAtlas.Region region = null;
-        if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount, blended, vertexData.region)) {
+        if (vertexData.region != null && uvsInsideTexture(customization, w, h, vertices, packed, owner, vertCount, blended, vertexData.region, blendedBounds)) {
             region = vertexData.region;
             renderType = opaque && vertexData.atlasOpaqueRenderType != null ? vertexData.atlasOpaqueRenderType : vertexData.atlasRenderType;
         } else {
             if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
                 org.figuramc.figura.benchmark.FiguraBenchmark.onStandalone(figuraTexture == null ? "notAvatarTexture" : vertexData.region == null ? (figuraTexture.getAtlasRegion() == null ? "notInAtlas" : "incompatibleType") : blended ? "blended" : owner != null && owner.verticesExposed() ? "scriptVertices" : "uvsOutside", vertCount);
             // drawn from the texture itself: make sure it is on the GPU on its own
-            if (figuraTexture != null && figuraTexture.getAtlasRegion() != null)
-                figuraTexture.requestStandalone();
+            if (figuraTexture != null && figuraTexture.getAtlasRegion() != null) {
+                // it uploads, on the render thread: a walk on a worker asks once it is done
+                if (deferring)
+                    deferredStandalone.add(figuraTexture);
+                else
+                    figuraTexture.requestStandalone();
+            }
             renderType = opaque && vertexData.opaqueRenderType != null ? vertexData.opaqueRenderType : vertexData.renderType;
         }
 
         // everything the write needs is copied now, the vertices themselves are read when the buffer is consumed
         // (the customization is a copy owned by the stack, so its values are the same as when the buffer is consumed)
-        Batch batch = VERTEX_BUFFER.add(renderType, vertexData.primary);
+        Batch batch = vertexBuffer.add(renderType, vertexData.primary);
         batch.set(vertCount, vertices, packed, owner, customization, w, h, vertexData, region);
         // if a script gets the vertex objects before the batch is written, all of them are drawn
         batch.objectCount = objectCount;
@@ -1041,13 +1364,13 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     }
 
     // uv bounds (in texture pixels) of packed vertex arrays: min u, min v, max u, max v, computed once per array
-    private static final Map<float[], float[]> UV_BOUNDS = new WeakHashMap<>();
+    private static final Map<float[], float[]> UV_BOUNDS = Collections.synchronizedMap(new WeakHashMap<>());
 
     // if every uv of the batch, after the part's uv matrix, stays within the texture: then it can be drawn from an atlas region
     // vertices scripts can reach are never atlased, a script may still change their uvs before the batch is written;
     // blended vertices are (ScriptTransformInterpolator.blendVertices): their array is only rewritten by the next blend, after this
     // pass wrote the batch, so its uvs are checked as they are now (not cached, they change from frame to frame)
-    private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount, boolean blended, AvatarAtlas.Region region) {
+    private static boolean uvsInsideTexture(PartCustomization customization, int w, int h, List<Vertex> vertices, float[] packed, FiguraModelPart owner, int vertCount, boolean blended, AvatarAtlas.Region region, float[] blendedBounds) {
         if (packed == null || (owner != null && owner.verticesExposed()) || w <= 0 || h <= 0)
             return false;
         float[] bounds = blended ? null : owner != null ? owner.uvBounds(packed) : UV_BOUNDS.get(packed);
@@ -1061,7 +1384,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
                 if (v < minV) minV = v;
                 if (v > maxV) maxV = v;
             }
-            bounds = BLENDED_BOUNDS;
+            bounds = blendedBounds;
             bounds[0] = minU; bounds[1] = minV; bounds[2] = maxU; bounds[3] = maxV;
         } else if (bounds == null) {
             float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE, maxU = -Float.MAX_VALUE, maxV = -Float.MAX_VALUE;
@@ -1099,8 +1422,8 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     }
 
     private static final double UV_EPSILON = 1e-4;
-    // scratch bounds of blended vertices (render thread only)
-    private static final float[] BLENDED_BOUNDS = new float[4];
+    // scratch bounds of blended vertices, per renderer (see uvsInsideTexture)
+    private final float[] blendedBounds = new float[4];
 
     private static class VertexData {
         public RenderType renderType;
@@ -1369,8 +1692,23 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         }
 
         // keep: the frame cache the batches are kept in for a replay instead of being freed, or null
-        public void consume(boolean primary, MultiBufferSource bufferSource, FrameCache keep) {
+        public void consume(Avatar avatar, boolean primary, MultiBufferSource bufferSource, FrameCache keep) {
             HashMap<RenderType, List<Batch>> map = primary ? primaryBuffers : secondaryBuffers;
+            // /figura perf: counted per avatar; in a nodraw run other avatars send nothing
+            if (org.figuramc.figura.utils.PerfProbe.isActive()) {
+                for (Map.Entry<RenderType, List<Batch>> entry : map.entrySet()) {
+                    int verts = 0;
+                    for (Batch batch : entry.getValue())
+                        verts += batch.vertCount;
+                    org.figuramc.figura.utils.PerfProbe.onRenderType(avatar, entry.getKey(), verts, entry.getValue().size());
+                }
+                if (org.figuramc.figura.utils.PerfProbe.skipDraw() && !avatar.isHost) {
+                    for (List<Batch> batches : map.values())
+                        free(batches);
+                    map.clear();
+                    return;
+                }
+            }
             // every render type of the pass written by the workers at once, then handed to the buffer one after the other below
             boolean prepared = prepareParallel(map, bufferSource);
             if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)
@@ -1513,6 +1851,16 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
             return true;
         }
 
+        // drops everything collected, after a walk that threw half way
+        void discard() {
+            for (List<Batch> batches : primaryBuffers.values())
+                free(batches);
+            for (List<Batch> batches : secondaryBuffers.values())
+                free(batches);
+            primaryBuffers.clear();
+            secondaryBuffers.clear();
+        }
+
         // returns the batches and their list to the pools
         void free(List<Batch> batches) {
             for (Batch batch : batches) {
@@ -1530,7 +1878,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
     private record RetainedType(RenderType renderType, List<Batch> batches) {}
 
     // everything one model pass drew, kept for the next frame to draw again (see replayFrame)
-    private static class FrameCache {
+    private class FrameCache {
         // the level frame of the pass, -1 when nothing is kept
         long frame = -1;
         // the entity root everything kept is relative to
@@ -1585,7 +1933,7 @@ public class ImmediateAvatarRenderer extends AvatarRenderer {
         void clear() {
             frame = -1;
             for (RetainedType retained : types)
-                VERTEX_BUFFER.free(retained.batches);
+                vertexBuffer.free(retained.batches);
             types.clear();
             layerParts.clear();
             layerCustomizations.clear();

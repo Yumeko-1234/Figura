@@ -201,7 +201,18 @@ public class AvatarCulling {
 
     // render script time still allowed this frame for all the time limited avatars together, taken by Avatar.run as their scripts run;
     // part render functions wait for a later frame once it is used up (see ImmediateAvatarRenderer.partScriptsDue)
-    public static long renderScriptPool = Long.MAX_VALUE;
+    public static volatile long renderScriptPool = Long.MAX_VALUE;
+
+    // takes script time from the pool; part render functions of model walks on the workers run side by side with the render thread
+    // and each other, so their time costs the frame about that divided by how many run at once (like Parallel Tick Scripts)
+    // -Dfigura.shareWorkerScriptTime=false: worker script time costs the budget in full, like on the render thread
+    private static final boolean SHARE_WORKER_SCRIPT_TIME = !"false".equalsIgnoreCase(System.getProperty("figura.shareWorkerScriptTime"));
+
+    public static synchronized void spendRenderScriptTime(long nanos) {
+        if (SHARE_WORKER_SCRIPT_TIME && org.figuramc.figura.utils.FiguraWorkers.isWorker())
+            nanos /= org.figuramc.figura.utils.FiguraWorkers.THREADS + 1;
+        renderScriptPool -= nanos;
+    }
 
     // other players' render scripts run at most Render Script Rate times per second, whatever the frame rate, so their cost no longer
     // grows with it; the expensive avatars run them less often so all of them together stay within the budget (milliseconds per 1/60 s).
@@ -292,7 +303,7 @@ public class AvatarCulling {
 
         // remembered for the next frame measure
         for (Avatar avatar : AVATARS)
-            avatar.renderScriptsRan = !avatar.renderScriptsSkipped && !avatar.isRenderSkipped();
+            avatar.renderScriptsRan = !avatar.renderScriptsSkipped && !avatar.isRenderSkipped() && avatar.scriptLevel() == 0;
     }
 
     // updates the estimated cost of one run of render scripts of an avatar in cycles, from everything measured since its last cycle
@@ -300,6 +311,11 @@ public class AvatarCulling {
     private static void measureRenderCycle(Avatar avatar) {
         long measured = avatar.renderScriptNanos;
         avatar.renderScriptNanos = 0;
+        // scripts off (Crowd Pings Only, Other Avatars' Scripts): nothing ran, the estimate from when they ran is kept for when they return
+        if (avatar.scriptLevel() > 0) {
+            avatar.renderEventNanos = 0;
+            return;
+        }
         if (avatar.renderCycle > 0) {
             if (measured <= 0)
                 avatar.renderScriptCost *= COST_DECAY;
@@ -409,21 +425,44 @@ public class AvatarCulling {
     }
 
     // Crowd Pings Only: counts every other player within the avatar render distance, also the ones out of view, so turning the camera
-    // never changes it. Switches on at once; switches off only after the count has stayed low for a moment, so a player
-    // walking back and forth around the limit does not start and stop everyone's scripts
+    // never changes it. Switches on at once (that only takes work away). Switches off only once the count is a few players under the
+    // limit and has stayed there for a moment, so players walking around the limit do not start and stop everyone's scripts; then the
+    // avatars come back one after the other over CROWD_RESUME_SPREAD_NANOS instead of all on the same frame (each one starting its
+    // scripts again costs a frame its full script time before the budgets have measured it)
     private static final long CROWD_SCRIPTS_RETURN_NANOS = 3_000_000_000L;
+    private static final long CROWD_RESUME_SPREAD_NANOS = 1_000_000_000L;
     // read by the tick script workers
     private static volatile boolean crowdPingsOnly;
+    // System.nanoTime() when crowd pings only last switched off, the avatars resume over the CROWD_RESUME_SPREAD_NANOS after it
+    private static volatile long crowdOffNanos = Long.MIN_VALUE;
     private static long lastCrowdNanos;
 
     public static boolean isCrowdPingsOnly() {
         return crowdPingsOnly;
     }
 
+    // if this player's avatar still only runs pings: crowd pings only is on, or it switched off and this avatar's turn to resume
+    // has not come yet (a fixed place per player in the resume spread)
+    public static boolean isCrowdPingsOnly(UUID owner) {
+        if (crowdPingsOnly)
+            return true;
+        long off = crowdOffNanos;
+        if (off == Long.MIN_VALUE)
+            return false;
+        long since = System.nanoTime() - off;
+        if (since >= CROWD_RESUME_SPREAD_NANOS)
+            return false;
+        return since < (long) (CROWD_RESUME_SPREAD_NANOS * (Math.floorMod(owner.hashCode(), 1024) / 1024d));
+    }
+
     private static void updateCrowdScripts(ClientLevel level) {
         int limit = Configs.CROWD_PINGS_ONLY.value;
         if (limit <= 0) {
-            crowdPingsOnly = false;
+            // turned off in the config while it was on: the avatars resume spread out, like when the crowd leaves
+            if (crowdPingsOnly) {
+                crowdPingsOnly = false;
+                crowdOffNanos = System.nanoTime();
+            }
             return;
         }
 
@@ -436,12 +475,19 @@ public class AvatarCulling {
                 count++;
         }
 
+        // a few players of margin under the limit before it may switch off (4 at the default of 40)
+        // (never 0: with a limit of 1 it switches off once nobody is left)
+        int offBelow = Math.max(1, limit - Math.max(1, limit / 10));
         long now = System.nanoTime();
         if (count >= limit) {
             crowdPingsOnly = true;
             lastCrowdNanos = now;
+        } else if (count >= offBelow) {
+            // between the two: stays as it is, and the wait before switching off starts over
+            lastCrowdNanos = now;
         } else if (crowdPingsOnly && now - lastCrowdNanos >= CROWD_SCRIPTS_RETURN_NANOS) {
             crowdPingsOnly = false;
+            crowdOffNanos = now;
         }
     }
 

@@ -435,6 +435,8 @@
     "figura.config.spread_tick_scripts.tooltip": "Runs other players' tick scripts on the frames between two game ticks instead of all on the same frame, which removes the stutter they cause 20 times a second\nThe scripts see the same world state either way, their changes can just show up to one tick later\nYour own avatar, focused players and full detail avatars always run on the tick",
     "figura.config.parallel_tick_scripts": "Parallel Tick Scripts",
     "figura.config.parallel_tick_scripts.tooltip": "Runs other players' tick scripts on several CPU cores at once\nThe parts of their scripts that only compute run side by side, calls into the game run one at a time\nYour own avatar always runs on the game thread",
+    "figura.config.parallel_model_walks": "Parallel Model Walks",
+    "figura.config.parallel_model_walks.tooltip": "Works out other players' avatar models on other CPU cores while the game draws the next entities\nLooks the same: each avatar is still drawn with its own player, only the work moves\nTheir part render scripts run there too, their calls into the game wait for a free moment\nYour own avatar always uses the game thread",
     "figura.config.avatar_tick_script_budget": "Other Avatars' Tick Script Budget",
     "figura.config.avatar_tick_script_budget.tooltip": "Time in milliseconds per tick that the tick scripts of other players' visible avatars can use together\nAvatars with expensive scripts tick less often to stay within it (at least once every 4 ticks), cheap ones keep ticking every tick\nYour own avatar and focused players are never limited, hidden avatars follow Skipped Avatar Tick Interval instead\n0 disables the budget",
     "figura.config.cache_part_matrices": "Reuse Part Transforms",

@@ -60,11 +60,19 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
     public boolean hasVanillaOffsets() {
         return vanillaApplied;
     }
-    // scratch vectors for applyVanillaTransforms, only used on the render thread and never kept
-    private static final FiguraVec3 VANILLA_PIVOT = FiguraVec3.of(), VANILLA_SCALE = FiguraVec3.of();
-    // same for applyExtraTransforms, the rotation is built once with the exact values rotateY(180) gives
-    private static final FiguraMat4 EXTRA_MATRIX = FiguraMat4.of(), ROTATE_Y_180 = FiguraMat4.of().rotateY(180);
-    private static final FiguraVec3 EXTRA_PIVOT = FiguraVec3.of();
+    // scratch values for applyVanillaTransforms and applyExtraTransforms, never kept: one set for the render thread,
+    // one per worker thread (other players' model walks run there, see ImmediateAvatarRenderer)
+    private static final class Scratch {
+        final FiguraVec3 vanillaPivot = FiguraVec3.of(), vanillaScale = FiguraVec3.of(), extraPivot = FiguraVec3.of();
+        final FiguraMat4 extraMatrix = FiguraMat4.of();
+    }
+    private static final Scratch RENDER_SCRATCH = new Scratch();
+    private static final ThreadLocal<Scratch> WORKER_SCRATCH = ThreadLocal.withInitial(Scratch::new);
+    private static Scratch scratch() {
+        return org.figuramc.figura.utils.FiguraWorkers.isWorker() ? WORKER_SCRATCH.get() : RENDER_SCRATCH;
+    }
+    // the rotation is built once with the exact values rotateY(180) gives, only read
+    private static final FiguraMat4 ROTATE_Y_180 = FiguraMat4.of().rotateY(180);
 
     private final Map<String, FiguraModelPart> childCache = new HashMap<>();
     public final List<FiguraModelPart> children;
@@ -367,13 +375,14 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
         // apply vanilla transforms
         customization.vanillaVisible = partData.visible;
 
-        FiguraVec3 defaultPivot = VANILLA_PIVOT.set(parentType.offset);
+        Scratch scratch = scratch();
+        FiguraVec3 defaultPivot = scratch.vanillaPivot.set(parentType.offset);
 
         defaultPivot.subtract(partData.pos);
 
         if (!overrideVanillaScale()) {
             // savedOffsets[3] is the offset scale from before this call
-            FiguraVec3 newScale = VANILLA_SCALE.set(partData.scale).multiply(savedOffsets[3]);
+            FiguraVec3 newScale = scratch.vanillaScale.set(partData.scale).multiply(savedOffsets[3]);
             defaultPivot.multiply(newScale);
             customization.offsetScale(newScale);
         }
@@ -411,7 +420,8 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             return;
 
         // scratch matrix and vector instead of new ones every frame (setMatrix copies the result)
-        FiguraMat4 prevPartToView = EXTRA_MATRIX.set(currentTransforms.positionMatrix).invert();
+        Scratch scratch = scratch();
+        FiguraMat4 prevPartToView = scratch.extraMatrix.set(currentTransforms.positionMatrix).invert();
         double s = 1 / 16d;
         if (UIHelper.paperdoll) {
             s *= -UIHelper.dollScale;
@@ -419,7 +429,7 @@ public class FiguraModelPart implements Comparable<FiguraModelPart> {
             prevPartToView.rightMultiply(ROTATE_Y_180);
         }
         FiguraVec3 scale = currentTransforms.stackScale;
-        FiguraVec3 piv2 = customization.getPivot(EXTRA_PIVOT, true);
+        FiguraVec3 piv2 = customization.getPivot(scratch.extraPivot, true);
         prevPartToView.scale(scale.x * s, scale.y * s, scale.z * s);
         prevPartToView.v14 = prevPartToView.v24 = prevPartToView.v34 = 0;
         prevPartToView.translateFirst(-piv2.x, -piv2.y, -piv2.z);

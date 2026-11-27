@@ -222,6 +222,47 @@ public abstract class AvatarRenderer {
         _sortParts(root);
     }
 
+    // if the model has parts with this parent type (cape, elytra...), drawn by that type's own pass
+    public boolean hasPartsFor(ParentType type) {
+        List<FiguraModelPart> parts = separatedParts.get(type);
+        return parts != null && !parts.isEmpty();
+    }
+
+    // the parent types the model has parts for, as of structureVersion pivotTypesVersion (render thread only)
+    private final java.util.EnumSet<ParentType> pivotTypes = java.util.EnumSet.noneOf(ParentType.class);
+    private int pivotTypesVersion = -1;
+
+    /**
+     * If the model may have parts with this parent type (held item, armor, parrot... pivots). Without any, the layer drawing the
+     * vanilla item doesn't need the model walk, so it doesn't wait for it. Render thread only; while the walk is on the workers
+     * and the model changed since the last check, the answer is yes (the model is not read while a script may change it).
+     */
+    public boolean mayHaveParentType(ParentType type) {
+        if (pivotTypesVersion != structureVersion) {
+            if (avatar.renderJob != null)
+                return true;
+            pivotTypes.clear();
+            collectParentTypes(root);
+            pivotTypesVersion = structureVersion;
+        }
+        return pivotTypes.contains(type);
+    }
+
+    // render thread, while no script can change the model (before a walk goes to the workers)
+    protected void refreshParentTypes() {
+        if (pivotTypesVersion == structureVersion)
+            return;
+        pivotTypes.clear();
+        collectParentTypes(root);
+        pivotTypesVersion = structureVersion;
+    }
+
+    private void collectParentTypes(FiguraModelPart part) {
+        pivotTypes.add(part.parentType);
+        for (FiguraModelPart child : part.children)
+            collectParentTypes(child);
+    }
+
     // world parts are drawn at their own world position, which can be anywhere instead of around the entity
     public boolean hasWorldParts() {
         List<FiguraModelPart> parts = separatedParts.get(ParentType.World);
@@ -286,6 +327,8 @@ public abstract class AvatarRenderer {
     }
 
     private void setupRenderer(PartFilterScheme currentFilterScheme, MultiBufferSource bufferSource, float tickDelta, int light, float alpha, int overlay, boolean translucent, boolean glowing) {
+        // every pass starts here: the model walk still running on the workers is finished first
+        avatar.awaitRenderJob();
         this.currentFilterScheme = currentFilterScheme;
         this.bufferSource = bufferSource;
         this.tickDelta = tickDelta;

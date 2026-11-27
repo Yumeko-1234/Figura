@@ -219,8 +219,16 @@ public class AvatarAtlas extends AbstractTexture {
             if (texture.atlasRegion != null && texture.atlasRegion.atlas == this)
                 texture.setAtlasRegion(null);
         textures.clear();
+        // nothing new is drawn from the atlas from here on (atlasRegion and Region.write check closed), but vertices already
+        // buffered for its render type (Iris's FullyBufferedMultiBufferSource, other mods' batches) are only flushed later in
+        // the frame. Freeing it now made that flush look the location up again: the texture manager tried to load it as a
+        // resource, failed and kept a missing texture under it. Render calls run in flipFrame, after the frame is drawn.
+        RenderSystem.recordRenderCall(this::release);
+    }
+
+    private void release() {
         this.releaseId();
-        ((TextureManagerAccessor) Minecraft.getInstance().getTextureManager()).getByPath().remove(this.location);
+        ((TextureManagerAccessor) Minecraft.getInstance().getTextureManager()).getByPath().remove(this.location, this);
     }
 
     public boolean isClosed() {

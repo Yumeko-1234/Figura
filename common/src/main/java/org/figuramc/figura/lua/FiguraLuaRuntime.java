@@ -79,7 +79,7 @@ public class FiguraLuaRuntime {
         userGlobals.load(new JseMathLib());
         LuaC.install(userGlobals);
         // hot functions compiled to JVM bytecode, see LuaJit
-        org.figuramc.figura.lua.jit.LuaJit.configure(org.figuramc.figura.config.Configs.LUA_COMPILER.value);
+        org.figuramc.figura.lua.jit.LuaCompiler.configure(org.figuramc.figura.config.Configs.LUA_COMPILER.value);
         // script constants share the pooled key instances, see LuaStringInterner
         Globals.Compiler compiler = userGlobals.compiler;
         userGlobals.compiler = (stream, chunkName) -> {
@@ -412,6 +412,10 @@ public class FiguraLuaRuntime {
         } catch (Exception | StackOverflowError e) {
             error(e);
             return false;
+        } catch (LinkageError e) {
+            org.figuramc.figura.lua.jit.LuaCompiler.onLinkageError(e);
+            error(e);
+            return false;
         }
 
         return true;
@@ -420,16 +424,19 @@ public class FiguraLuaRuntime {
     // error ^-^ //
 
     public void error(Throwable e) {
-        // also from Figura's worker threads (parallel tick scripts): the chat is shared
-        synchronized (org.figuramc.figura.utils.FiguraWorkers.LOCK) {
+        // also from Figura's worker threads (parallel tick scripts, model walks): the chat, particles and sounds are shared
+        org.figuramc.figura.utils.FiguraWorkers.LOCK.lock();
+        try {
             FiguraLuaPrinter.sendLuaError(parseError(e), owner);
+            owner.scriptError = true;
+            owner.luaRuntime = null;
+            owner.clearParticles();
+            owner.clearSounds();
+            owner.closeBuffers();
+            owner.closeStreams();
+        } finally {
+            org.figuramc.figura.utils.FiguraWorkers.LOCK.unlock();
         }
-        owner.scriptError = true;
-        owner.luaRuntime = null;
-        owner.clearParticles();
-        owner.clearSounds();
-        owner.closeBuffers();
-        owner.closeStreams();
     }
 
     public static LuaError parseError(Throwable e) {
@@ -496,6 +503,9 @@ public class FiguraLuaRuntime {
             // and return the value
             return ret;
         } catch (Exception | StackOverflowError e) {
+            error(e);
+        } catch (LinkageError e) {
+            org.figuramc.figura.lua.jit.LuaCompiler.onLinkageError(e);
             error(e);
         }
 

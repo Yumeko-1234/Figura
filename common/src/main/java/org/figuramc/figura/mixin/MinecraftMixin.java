@@ -126,6 +126,7 @@ public abstract class MinecraftMixin {
 
     @Inject(at = @At("RETURN"), method = "clearLevel(Lnet/minecraft/client/gui/screens/Screen;)V")
     private void clearLevel(Screen screen, CallbackInfo ci) {
+        AvatarManager.clearAvatarOverrides();
         AvatarManager.clearAllAvatars();
         FiguraLuaPrinter.clearPrintQueue();
         NetworkStuff.unsubscribeAll();
@@ -138,6 +139,7 @@ public abstract class MinecraftMixin {
 
     @Inject(at = @At("HEAD"), method = "runTick")
     private void preTick(boolean tick, CallbackInfo ci) {
+        org.figuramc.figura.utils.FreezeWatchdog.beat();
         AvatarManager.runDeferredTicks();
         AvatarManager.executeAll("applyBBAnimations", Avatar::applyAnimations);
     }

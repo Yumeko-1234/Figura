@@ -30,6 +30,10 @@ class RunCommand {
         } catch (Exception | StackOverflowError e) {
             FiguraLuaPrinter.sendLuaError(FiguraLuaRuntime.parseError(e), luaRuntime.owner);
             return 0;
+        } catch (LinkageError e) {
+            org.figuramc.figura.lua.jit.LuaCompiler.onLinkageError(e);
+            FiguraLuaPrinter.sendLuaError(FiguraLuaRuntime.parseError(e), luaRuntime.owner);
+            return 0;
         }
     }
 }

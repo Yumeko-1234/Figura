@@ -31,6 +31,7 @@ for pass in "$@"; do
     [ -n "${JIT:-}" ] && args="$args -Dfigura.luaJit=$([ "$JIT" = 0 ] && echo false || echo true)"
     echo "=== $label ($args)"
     extra=""; [ -n "${BHOPT:-}" ] && extra="-Pbhopt=$BHOPT"
+    [ -n "${ACCEL:-}" ] && extra="$extra -Paccel=$ACCEL"
     ./gradlew :forge:runClient -Pbenchmark $extra "-PbenchmarkArgs=$args" --console=plain > "benchmark/results/$label-gradle.log" 2>&1
     echo "=== $label exit $?"
     grep -a "\[benchmark\] $label |" "benchmark/results/$label-gradle.log" || echo "=== $label produced no result, see benchmark/results/$label-gradle.log"

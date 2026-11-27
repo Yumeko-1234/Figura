@@ -44,6 +44,17 @@ public abstract class LevelRendererMixin {
         return entity;
     }
 
+    // /figura perf: CPU and GPU time of the world render
+    @Inject(method = "renderLevel", at = @At("HEAD"))
+    private void perfLevelStart(PoseStack stack, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        org.figuramc.figura.utils.PerfProbe.onLevelStart();
+    }
+
+    @Inject(method = "renderLevel", at = @At("RETURN"))
+    private void perfLevelEnd(PoseStack stack, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        org.figuramc.figura.utils.PerfProbe.onLevelEnd();
+    }
+
     @Inject(method = "renderEntity", at = @At("HEAD"))
     private void renderEntity(Entity entity, double cameraX, double cameraY, double cameraZ, float tickDelta, PoseStack matrices, MultiBufferSource bufferSource, CallbackInfo ci) {
         Avatar avatar = AvatarManager.getAvatarForRender(entity);
@@ -69,8 +80,22 @@ public abstract class LevelRendererMixin {
         FiguraMod.popProfiler(3);
     }
 
+    // after the last entity, before the entity batches are drawn: the model walks still out on the workers are drawn now
+    // require = 0: Accelerated Rendering wraps this call (WrapOperation); if this can't be applied, the walks are drawn at the
+    // checkPoseStack right after it (renderLevelFirstPerson), still before the entity batches are drawn with Iris
+    @Inject(method = "renderLevel", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/MultiBufferSource$BufferSource;endLastBatch()V", ordinal = 0), require = 0)
+    private void finishParallelWalks(PoseStack stack, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        FiguraMod.pushProfiler(FiguraMod.MOD_ID);
+        FiguraMod.pushProfiler("finishParallelWalks");
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.finishParallelWalks("endLastBatch");
+        FiguraMod.popProfiler(2);
+    }
+
     @Inject(method = "renderLevel", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;checkPoseStack(Lcom/mojang/blaze3d/vertex/PoseStack;)V", ordinal = 0))
     private void renderLevelFirstPerson(PoseStack stack, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        // the walks still out, if the hook on endLastBatch could not be applied
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.finishParallelWalks("checkPoseStack");
+
         if (camera.isDetached())
             return;
 
@@ -115,6 +140,8 @@ public abstract class LevelRendererMixin {
 
     @Inject(method = "renderLevel", at = @At("HEAD"))
     private void onRenderLevel(PoseStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        // other players' model walks may go to the workers from here until the last entity
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.beginLevelEntities();
         // before the Iris shadow pass, which is drawn later in renderLevel
         Avatar.beginLevelFrame();
 
@@ -128,6 +155,8 @@ public abstract class LevelRendererMixin {
 
     @Inject(method = "renderLevel", at = @At("RETURN"))
     private void afterRenderLevel(PoseStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
+        // in case the hook after the last entity did not run
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.finishParallelWalks();
         AvatarManager.executeAll("postWorldRender", avatar -> avatar.postWorldRenderEvent(tickDelta));
         EpicFightPoseThrottle.endEntity();
         if (org.figuramc.figura.benchmark.FiguraBenchmark.ENABLED)

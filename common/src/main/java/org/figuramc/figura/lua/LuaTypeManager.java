@@ -242,9 +242,12 @@ public class LuaTypeManager {
 
             @Override
             public Varargs invoke(Varargs args) {
-                if (locked && FiguraWorkers.isWorker()) {
-                    synchronized (FiguraWorkers.LOCK) {
+                if (locked && FiguraWorkers.needsApiLock()) {
+                    FiguraWorkers.lockForApi();
+                    try {
                         return call(args);
+                    } finally {
+                        FiguraWorkers.LOCK.unlock();
                     }
                 }
                 return call(args);

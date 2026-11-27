@@ -378,8 +378,11 @@ public class FiguraLuaPrinter {
      */
     private static void sendLuaChatMessage(Component message) throws LuaError {
         // tick scripts of other avatars may print from Figura's worker threads
-        synchronized (org.figuramc.figura.utils.FiguraWorkers.LOCK) {
+        org.figuramc.figura.utils.FiguraWorkers.LOCK.lock();
+        try {
             queueChat(message);
+        } finally {
+            org.figuramc.figura.utils.FiguraWorkers.LOCK.unlock();
         }
     }
 

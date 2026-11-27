@@ -80,6 +80,163 @@ public class IrisCompat {
         }
     }
 
+    // -- what the batched entity buffers are drawn with -- //
+
+    private static final boolean STATE_AVAILABLE;
+
+    static {
+        boolean available;
+        try {
+            Class.forName("net.irisshaders.iris.uniforms.CapturedRenderingState");
+            Class.forName("net.irisshaders.batchedentityrendering.impl.FullyBufferedMultiBufferSource");
+            available = true;
+        } catch (Throwable ignored) {
+            available = false;
+        }
+        STATE_AVAILABLE = available;
+    }
+
+    private static boolean stateFailed;
+    public static final int NO_ENTITY_STATE = Integer.MIN_VALUE;
+
+    // the entity id Iris writes into entity vertices right now (the entity being rendered), NO_ENTITY_STATE without Iris
+    public static int currentEntity() {
+        if (!STATE_AVAILABLE || stateFailed)
+            return NO_ENTITY_STATE;
+        try {
+            return State.get();
+        } catch (Throwable t) {
+            stateFail(t);
+            return NO_ENTITY_STATE;
+        }
+    }
+
+    // makes Iris write this entity id into the vertices written from now on, returns the one to give back to restoreCurrentEntity
+    public static int swapCurrentEntity(int entity) {
+        if (entity == NO_ENTITY_STATE || !STATE_AVAILABLE || stateFailed)
+            return NO_ENTITY_STATE;
+        try {
+            int prev = State.get();
+            State.set(entity);
+            return prev;
+        } catch (Throwable t) {
+            stateFail(t);
+            return NO_ENTITY_STATE;
+        }
+    }
+
+    public static void restoreCurrentEntity(int prev) {
+        if (prev == NO_ENTITY_STATE || stateFailed)
+            return;
+        try {
+            State.set(prev);
+        } catch (Throwable t) {
+            stateFail(t);
+        }
+    }
+
+    // if entities draw into this buffer source during the level render: the level one, or the wrapper Iris gives them in its place
+    public static boolean isLevelBufferSource(MultiBufferSource bufferSource) {
+        MultiBufferSource level = Minecraft.getInstance().renderBuffers().bufferSource();
+        if (bufferSource == level)
+            return true;
+        if (!STATE_AVAILABLE || stateFailed)
+            return false;
+        try {
+            if (State.isWrapperOf(bufferSource, level))
+                return true;
+            // Iris gives each entity a lambda that only marks the render types as entity ones and passes them on, the same for
+            // every entity, so it can be drawn into later as well
+            // Accelerated Rendering wraps that again, per entity, in a record that hands getBuffer to it
+            MultiBufferSource accelerated = acceleratedWrapped(bufferSource);
+            if (accelerated != null)
+                bufferSource = accelerated;
+            if (bufferSource == level || State.isWrapperOf(bufferSource, level))
+                return true;
+            MultiBufferSource inner = entityTagWrapped(bufferSource);
+            return inner != null && (inner == level || State.isWrapperOf(inner, level));
+        } catch (Throwable t) {
+            stateFail(t);
+            return false;
+        }
+    }
+
+    // the buffer source behind Iris' per entity lambda (made in EntityRenderDispatcher by its entity render context mixin), or null
+    private static Class<?> entityTagClass;
+    private static java.lang.reflect.Field entityTagField;
+
+    private static boolean entityTagFailed;
+
+    private static MultiBufferSource entityTagWrapped(MultiBufferSource bufferSource) {
+        if (entityTagFailed)
+            return null;
+        try {
+            return readEntityTagWrapped(bufferSource);
+        } catch (Throwable t) {
+            entityTagFailed = true;
+            FiguraMod.LOGGER.warn("Failed to look behind the Iris entity buffer source, avatars of other players are walked on the render thread", t);
+            return null;
+        }
+    }
+
+    // Accelerated Rendering's IrisEntityAcceleratableBufferSource(wrapped, original): getBuffer only calls wrapped.getBuffer
+    private static final String ACCELERATED_WRAPPER = "com.github.argon4w.acceleratedrendering.compat.iris.buffers.IrisEntityAcceleratableBufferSource";
+    private static java.lang.reflect.Method acceleratedWrappedAccessor;
+    private static boolean acceleratedFailed;
+
+    private static MultiBufferSource acceleratedWrapped(MultiBufferSource bufferSource) {
+        if (acceleratedFailed || !bufferSource.getClass().getName().equals(ACCELERATED_WRAPPER))
+            return null;
+        try {
+            if (acceleratedWrappedAccessor == null) {
+                java.lang.reflect.Method m = bufferSource.getClass().getMethod("wrapped");
+                m.setAccessible(true);
+                acceleratedWrappedAccessor = m;
+            }
+            return (MultiBufferSource) acceleratedWrappedAccessor.invoke(bufferSource);
+        } catch (Throwable t) {
+            acceleratedFailed = true;
+            FiguraMod.LOGGER.warn("Failed to look behind the Accelerated Rendering entity buffer source, avatars of other players are walked on the render thread", t);
+            return null;
+        }
+    }
+
+    private static MultiBufferSource readEntityTagWrapped(MultiBufferSource bufferSource) throws IllegalAccessException {
+        Class<?> c = bufferSource.getClass();
+        if (c != entityTagClass) {
+            if (!c.getName().startsWith("net.minecraft.client.renderer.entity.EntityRenderDispatcher$$Lambda"))
+                return null;
+            java.lang.reflect.Field[] fields = c.getDeclaredFields();
+            if (fields.length != 1 || fields[0].getType() != MultiBufferSource.class)
+                return null;
+            fields[0].setAccessible(true);
+            entityTagField = fields[0];
+            entityTagClass = c;
+        }
+        return (MultiBufferSource) entityTagField.get(bufferSource);
+    }
+
+    private static void stateFail(Throwable t) {
+        stateFailed = true;
+        FiguraMod.LOGGER.error("Failed to read the Iris entity rendering state, avatars of other players are walked on the render thread", t);
+    }
+
+    // separate class so the Iris classes are only loaded when they are present
+    private static class State {
+        static int get() {
+            return net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE.getCurrentRenderedEntity();
+        }
+
+        static void set(int entity) {
+            net.irisshaders.iris.uniforms.CapturedRenderingState.INSTANCE.setCurrentEntity(entity);
+        }
+
+        static boolean isWrapperOf(MultiBufferSource bufferSource, MultiBufferSource level) {
+            return level instanceof net.irisshaders.batchedentityrendering.impl.FullyBufferedMultiBufferSource buffered
+                    && buffered.getUnflushableWrapper() == bufferSource;
+        }
+    }
+
     private static void fail(Throwable t) {
         // never try again if the api is not what we expected
         failed = true;

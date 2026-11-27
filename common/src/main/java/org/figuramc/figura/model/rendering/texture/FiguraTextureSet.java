@@ -55,7 +55,26 @@ public class FiguraTextureSet {
         return -1;
     }
 
+    // the skin, cape and elytra textures of a player now, or null when unknown; read on the render thread (looking them up can
+    // start loading them), for model walks on the workers (getOverrideTexture with player textures)
+    public static ResourceLocation[] playerTextures(UUID owner) {
+        ClientPacketListener connection = Minecraft.getInstance().getConnection();
+        PlayerInfo info = connection == null ? null : connection.getPlayerInfo(owner);
+        if (info == null)
+            return null;
+        return new ResourceLocation[] {
+                info.getSkinLocation(),
+                info.getCapeLocation(),
+                info.getElytraLocation() == null ? ElytraLayerAccessor.getWingsLocation() : info.getElytraLocation()
+        };
+    }
+
     public ResourceLocation getOverrideTexture(UUID owner, TextureCustomization pair) {
+        return getOverrideTexture(owner, pair, false, null);
+    }
+
+    // known: the player textures were looked up before (playerTextures, may be null), instead of looking them up now
+    public ResourceLocation getOverrideTexture(UUID owner, TextureCustomization pair, boolean known, ResourceLocation[] player) {
         OverrideType type;
 
         if (pair == null || (type = pair.getOverrideType()) == null)
@@ -63,6 +82,12 @@ public class FiguraTextureSet {
 
         return switch (type) {
             case SKIN, CAPE, ELYTRA -> {
+                if (known) {
+                    if (player == null)
+                        yield null;
+                    yield player[type == OverrideType.SKIN ? 0 : type == OverrideType.CAPE ? 1 : 2];
+                }
+
                 ClientPacketListener connection = Minecraft.getInstance().getConnection();
                 if (connection == null)
                     yield null;

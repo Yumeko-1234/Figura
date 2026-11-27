@@ -73,6 +73,9 @@ public class AvatarManager {
     private static void runTicks(List<Avatar> avatars) {
         if (avatars.isEmpty())
             return;
+        // model walks are only out during the level render; if one is still out (a level render that ended early), it is finished
+        // first, so tick scripts never run while the render thread holds the workers' lock for it
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.finishParallelWalks();
         if (avatars.size() == 1 || !Configs.PARALLEL_TICK_SCRIPTS.value || !org.figuramc.figura.utils.FiguraWorkers.available()) {
             for (Avatar avatar : avatars) {
                 FiguraMod.pushProfiler(avatar);
@@ -150,6 +153,7 @@ public class AvatarManager {
         }
 
         loadNearbyAvatars();
+        updateAvatarOverrides();
 
         // tick the avatars
         TICKING.clear();
@@ -384,7 +388,10 @@ public class AvatarManager {
     }
 
     // clears ALL loaded avatars, including local
+    // active overrides are kept and their copies rebuilt on the next tick (call clearAvatarOverrides to drop them too)
     public static void clearAllAvatars() {
+        for (UserData user : LOADED_USERS.values())
+            user.cleanOverrideAvatar();
         for (UUID id : LOADED_USERS.keySet())
             clearAvatars(id);
 
@@ -459,6 +466,95 @@ public class AvatarManager {
 
         FiguraMod.debug("Getting userdata for " + id);
         NetworkStuff.getUser(user);
+    }
+
+    // -- avatar overrides -- //
+    // public API for other mods (e.g. disguises): a player shows a copy of another player's avatar instead of their own
+    // the copy belongs to the player (its scripts see the player's entity), never runs as host, uses the permissions
+    // given to the source, and is rebuilt when the source changes avatar; until the source avatar is loaded (or if the
+    // source has none) the player shows no avatar at all, so the own one never gives the disguise away
+
+    // player -> source
+    private static final Map<UUID, UUID> OVERRIDES = new ConcurrentHashMap<>();
+
+    /**
+     * Makes {@code player} show {@code source}'s avatar. Fetches the source's avatar from the backend if needed.
+     * Setting a player as their own source clears the override.
+     */
+    public static void setAvatarOverride(UUID player, UUID source) {
+        if (player.equals(source)) {
+            clearAvatarOverride(player);
+            return;
+        }
+        OVERRIDES.put(player, source);
+        updateAvatarOverride(player, source);
+    }
+
+    /** Ends the override of {@code player}: their own avatar is shown again, without fetching it again. */
+    public static void clearAvatarOverride(UUID player) {
+        if (OVERRIDES.remove(player) == null)
+            return;
+        UserData user = LOADED_USERS.get(player);
+        if (user != null)
+            user.setOverride(null);
+    }
+
+    /** Ends every override, e.g. when leaving the world. */
+    public static void clearAvatarOverrides() {
+        for (UUID player : new ArrayList<>(OVERRIDES.keySet()))
+            clearAvatarOverride(player);
+    }
+
+    /** The player whose avatar {@code player} currently shows instead of their own, or null. */
+    public static UUID getAvatarOverride(UUID player) {
+        return OVERRIDES.get(player);
+    }
+
+    private static void updateAvatarOverrides() {
+        for (Map.Entry<UUID, UUID> entry : OVERRIDES.entrySet())
+            updateAvatarOverride(entry.getKey(), entry.getValue());
+    }
+
+    // runs on the (unguarded) client tick: a failure is logged and leaves the player without a copy, it never crashes the game
+    private static void updateAvatarOverride(UUID player, UUID source) {
+        try {
+            updateAvatarOverrideUnsafe(player, source);
+        } catch (Exception e) {
+            FiguraMod.LOGGER.error("Failed to update the avatar override of " + player + " (source " + source + ")", e);
+        }
+    }
+
+    private static void updateAvatarOverrideUnsafe(UUID player, UUID source) {
+        if (panic || Minecraft.getInstance().level == null)
+            return;
+
+        UserData user = LOADED_USERS.computeIfAbsent(player, UserData::new);
+        user.setOverride(source);
+
+        // load the source avatar like a render path would, but take its own avatar, not an override it may have
+        fetchBackend(source);
+        UserData sourceUser = LOADED_USERS.get(source);
+        if (sourceUser == null)
+            return;
+        sourceUser.want();
+        user.updateOverride(sourceUser.getOwnAvatar());
+    }
+
+    // the source's pings also run on the copies of its avatar, so ping driven animations show on the disguise too
+    public static void forwardPingToOverrides(UUID source, int id, byte[] data) {
+        for (Map.Entry<UUID, UUID> entry : OVERRIDES.entrySet()) {
+            if (!entry.getValue().equals(source))
+                continue;
+            UserData user = LOADED_USERS.get(entry.getKey());
+            Avatar copy = user == null ? null : user.getMainAvatar();
+            if (copy == null)
+                continue;
+            try {
+                copy.runPing(id, data);
+            } catch (Exception e) {
+                FiguraMod.LOGGER.error("Failed to forward a ping of " + source + " to the avatar override of " + entry.getKey(), e);
+            }
+        }
     }
 
     // the backend fetch of this user failed, try again in 5 seconds

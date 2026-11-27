@@ -165,6 +165,7 @@ public class Configs {
             REPLAY_CROWD_AVATARS = new ConfigType.BoolConfig("replay_crowd_avatars", RENDERING, false),
             SPREAD_TICK_SCRIPTS = new ConfigType.BoolConfig("spread_tick_scripts", RENDERING, true),
             PARALLEL_TICK_SCRIPTS = new ConfigType.BoolConfig("parallel_tick_scripts", RENDERING, true),
+            PARALLEL_MODEL_WALKS = new ConfigType.BoolConfig("parallel_model_walks", RENDERING, true),
             AVATAR_VIEW_CULLING = new ConfigType.BoolConfig("avatar_view_culling", RENDERING, true),
             CACHE_PART_MATRICES = new ConfigType.BoolConfig("cache_part_matrices", RENDERING, true),
             SHARE_SHADOW_PASS_SCRIPTS = new ConfigType.BoolConfig("share_shadow_pass_scripts", RENDERING, true),
@@ -172,7 +173,7 @@ public class Configs {
                 @Override
                 public void onChange() {
                     super.onChange();
-                    org.figuramc.figura.lua.jit.LuaJit.configure(value);
+                    org.figuramc.figura.lua.jit.LuaCompiler.configure(value);
                 }
             };
     // other players' avatars: 0 every script, 1 only pings (action wheel), 2 only the init script (see Avatar.scriptLevel)
@@ -381,7 +382,7 @@ public class Configs {
     static {
         markFpsSettings(
                 OTHER_AVATAR_SCRIPTS, CROWD_PINGS_ONLY, AVATAR_RENDER_SCRIPT_BUDGET, AVATAR_TICK_SCRIPT_BUDGET, AVATAR_RENDER_SCRIPT_RATE,
-                PARALLEL_TICK_SCRIPTS, LUA_COMPILER, SHARE_SHADOW_PASS_SCRIPTS, SPREAD_TICK_SCRIPTS,
+                PARALLEL_TICK_SCRIPTS, PARALLEL_MODEL_WALKS, LUA_COMPILER, SHARE_SHADOW_PASS_SCRIPTS, SPREAD_TICK_SCRIPTS,
                 AVATAR_RENDER_DISTANCE, AVATAR_VIEW_CULLING, CULLED_AVATAR_TICK_INTERVAL,
                 BODY_LOD, FULL_RATE_ANIMATIONS
         );

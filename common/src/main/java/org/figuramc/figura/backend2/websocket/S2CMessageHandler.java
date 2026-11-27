@@ -54,15 +54,19 @@ public class S2CMessageHandler {
     private static void ping(ByteBuffer bytes) {
         UUID uuid = new UUID(bytes.getLong(), bytes.getLong());
 
-        Avatar avatar = AvatarManager.getLoadedAvatar(uuid);
-        if (avatar == null)
-            return;
-
         int id = bytes.getInt();
         bytes.get(); // sync value is ignored
 
         byte[] data = new byte[bytes.remaining()];
         bytes.get(data);
+
+        // the copies of this player's avatar shown on other players (avatar overrides) get the ping too
+        AvatarManager.forwardPingToOverrides(uuid, id, data);
+
+        // a player showing someone else's avatar: the ping is for their own avatar, which is not shown
+        Avatar avatar = AvatarManager.getAvatarOverride(uuid) != null ? null : AvatarManager.getLoadedAvatar(uuid);
+        if (avatar == null)
+            return;
 
         avatar.runPing(id, data);
         NetworkStuff.pingsReceived++;

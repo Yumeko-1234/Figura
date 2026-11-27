@@ -9,6 +9,7 @@ import org.figuramc.figura.backend2.NetworkStuff;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -90,8 +91,64 @@ public class UserData {
         return avatars;
     }
 
+    // while an override is active this is the copy of the source's avatar (null until it is built), see AvatarManager.setAvatarOverride
     public Avatar getMainAvatar() {
+        return overrideSource != null ? overrideAvatar : avatars.peek();
+    }
+
+    // the user's own avatar, ignoring any override
+    public Avatar getOwnAvatar() {
         return avatars.peek();
+    }
+
+    // -- avatar override -- //
+    // kept apart from the own avatars: backend refreshes (loadData, clear) keep loading the own avatar in the
+    // background without touching the override, and it is shown again as soon as the override ends
+
+    private volatile UUID overrideSource;
+    private volatile Avatar overrideAvatar;
+    // the source avatar the copy was built from, to rebuild the copy when the source changes its avatar
+    private Avatar overrideBuiltFrom;
+
+    public UUID getOverrideSource() {
+        return overrideSource;
+    }
+
+    // the override methods are only called on the client thread (AvatarManager), so they don't lock: they must not take
+    // this object's monitor, which the backend thread holds in loadData while it loads avatars (deadlock)
+    // other threads only read the volatile fields through getMainAvatar
+
+    void setOverride(UUID source) {
+        if (Objects.equals(source, overrideSource))
+            return;
+        cleanOverrideAvatar();
+        overrideSource = source;
+    }
+
+    // builds (or rebuilds) the copy from the source's current own avatar; does nothing if it is already built from it
+    void updateOverride(Avatar sourceAvatar) {
+        UUID source = overrideSource;
+        if (source == null || sourceAvatar == null || sourceAvatar.nbt == null || sourceAvatar == overrideBuiltFrom)
+            return;
+        cleanOverrideAvatar();
+        // marked as built first, so a copy that fails to load is not retried every tick
+        overrideBuiltFrom = sourceAvatar;
+        Avatar copy = Avatar.overrideCopy(id, source);
+        try {
+            copy.load(sourceAvatar.nbt);
+        } catch (Exception e) {
+            copy.clean();
+            throw e;
+        }
+        overrideAvatar = copy;
+    }
+
+    void cleanOverrideAvatar() {
+        Avatar copy = overrideAvatar;
+        overrideAvatar = null;
+        overrideBuiltFrom = null;
+        if (copy != null)
+            copy.clean();
     }
 
     public boolean hasAvatars() {

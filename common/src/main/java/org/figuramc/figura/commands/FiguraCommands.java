@@ -40,6 +40,9 @@ public class FiguraCommands {
         // export
         root.then(ExportCommand.getCommand());
 
+        // perf
+        root.then(PerfCommand.getCommand());
+
         // badge
         root.then(BadgeCommand.getCommand());
 

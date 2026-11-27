@@ -81,6 +81,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Consumer;
 
@@ -159,6 +160,38 @@ public class Avatar {
     // functions once per cycle; if a part ran them this frame (one always may, even past the frame's budget)
     public long renderCycle;
     public boolean partScriptsRanThisFrame;
+
+    // the model walk of this avatar handed to the workers (Parallel Model Walks, see ImmediateAvatarRenderer), null when there is none
+    public volatile org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.ParallelWalk renderJob;
+
+    /**
+     * Finishes the model walk of this avatar that runs on the workers, if any, before anything else uses the avatar: its scripts,
+     * its renderer, or what the walk leaves for the rest of the entity render (held item and armor pivots, cape and elytra parts).
+     * False when called from another worker thread (an event of another avatar's script), which must not touch this avatar now.
+     */
+    public boolean awaitRenderJob() {
+        org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.ParallelWalk job = renderJob;
+        if (job == null || job.isRunningHere())
+            return true;
+        if (org.figuramc.figura.utils.FiguraWorkers.isWorker())
+            return false;
+        job.finish();
+        return true;
+    }
+
+    // one thread at a time runs this avatar's scripts: other players' tick scripts and model walks run on Figura's worker threads,
+    // and an api call there may run events of other avatars (sounds...) while their own scripts run on another worker
+    private final ReentrantLock scriptLock = new ReentrantLock();
+
+    // takes the script lock; from a thread running scripts next to others (workers, the thread running a parallel job, or the
+    // render thread while model walks are out) it gives up instead of waiting, since the holder may be waiting for a lock this
+    // thread has: the event is skipped then
+    private boolean lockScripts() {
+        if (org.figuramc.figura.utils.FiguraWorkers.needsApiLock() || org.figuramc.figura.utils.FiguraWorkers.LOCK.isHeldByCurrentThread())
+            return scriptLock.tryLock();
+        scriptLock.lock();
+        return true;
+    }
     // time of the render events alone (render and post render), they run on the first frame of a cycle
     public long renderEventNanos;
     public double renderEventCost;
@@ -180,14 +213,14 @@ public class Avatar {
     public final Instructions init, render, worldRender, tick, worldTick, animation;
     public final Map<String, Instructions> customInstructions = new HashMap<>();
     public final RefilledNumber particlesRemaining, soundsRemaining;
-    private Avatar(UUID owner, EntityType<?> type, String name) {
+    private Avatar(UUID owner, EntityType<?> type, String name, PermissionPack.PlayerPermissionPack permissions, boolean allowHost) {
         this.owner = owner;
         this.entityType = type;
-        this.isHost = type == EntityType.PLAYER && FiguraMod.isLocal(owner);
+        this.isHost = allowHost && type == EntityType.PLAYER && FiguraMod.isLocal(owner);
         // a different start per player, so throttled avatars with the same interval run on different frames
         this.renderScriptCredit = Math.floorMod(owner.hashCode(), 1024) / 1024d;
         this.tickScriptCredit = this.renderScriptCredit;
-        this.permissions = type == EntityType.PLAYER ? PermissionManager.get(owner) : PermissionManager.getMobPermissions(owner);
+        this.permissions = permissions;
         this.complexity = new Instructions(permissions.get(Permissions.COMPLEXITY));
         this.init = new Instructions(permissions.get(Permissions.INIT_INST));
         this.render = new Instructions(permissions.get(Permissions.RENDER_INST));
@@ -206,12 +239,25 @@ public class Avatar {
         }
     }
 
+    private Avatar(UUID owner, EntityType<?> type, String name) {
+        this(owner, type, name, type == EntityType.PLAYER ? PermissionManager.get(owner) : PermissionManager.getMobPermissions(owner), true);
+    }
+
     public Avatar(UUID owner) {
         this(owner, EntityType.PLAYER, EntityUtils.getNameForUUID(owner));
     }
 
     public Avatar(Entity entity) {
         this(entity.getUUID(), entity.getType(), entity.getName().getString());
+    }
+
+    /**
+     * A copy of another player's avatar shown on {@code owner} (see {@link AvatarManager#setAvatarOverride}).
+     * Its script is the source's, so it never runs as host (even on the local player: no chat, files, networking,
+     * action wheel or outgoing pings) and is limited by the permissions given to the source, not to the owner.
+     */
+    public static Avatar overrideCopy(UUID owner, UUID source) {
+        return new Avatar(owner, EntityType.PLAYER, EntityUtils.getNameForUUID(owner), PermissionManager.get(source), false);
     }
 
     public void load(CompoundTag nbt) {
@@ -275,9 +321,13 @@ public class Avatar {
                 // sounds and script
                 loadCustomSounds();
                 createLuaRuntime();
-            } catch (Exception e) {
-                FiguraMod.LOGGER.error("", e);
-                cleanResources();
+            } catch (Throwable e) {
+                // any Throwable: this runs in a CompletableFuture, which would swallow an Error and leave the avatar loading forever
+                FiguraMod.LOGGER.error("Failed to load the avatar of " + owner, e);
+                try {
+                    cleanResources();
+                } catch (Throwable ignored) {
+                }
                 this.nbt = null;
                 this.renderer = null;
                 this.luaRuntime = null;
@@ -357,7 +407,13 @@ public class Avatar {
             return;
 
         tick.reset(permissions.get(Permissions.TICK_INST));
-        flushQueuedEvents();
+        if (!awaitRenderJob() || !lockScripts())
+            return;
+        try {
+            flushQueuedEvents();
+        } finally {
+            scriptLock.unlock();
+        }
     }
 
     public void render(float delta) {
@@ -390,7 +446,7 @@ public class Avatar {
     public int scriptLevel() {
         if (isHost || AvatarCulling.isFocused(owner) || AvatarCulling.isFullDetail(owner))
             return 0;
-        return Math.max(Configs.OTHER_AVATAR_SCRIPTS.value, AvatarCulling.isCrowdPingsOnly() ? 1 : 0);
+        return Math.max(Configs.OTHER_AVATAR_SCRIPTS.value, AvatarCulling.isCrowdPingsOnly(owner) ? 1 : 0);
     }
 
     public void runPing(int id, byte[] data) {
@@ -422,43 +478,59 @@ public class Avatar {
             } catch (Exception | StackOverflowError ex) {
                 if (luaRuntime != null)
                     luaRuntime.error(ex);
+            } catch (LinkageError ex) {
+                org.figuramc.figura.lua.jit.LuaCompiler.onLinkageError(ex);
+                if (luaRuntime != null)
+                    luaRuntime.error(ex);
             }
         }
     }
 
     @Nullable
     public Varargs run(Object toRun, Instructions limit, Object... args) {
-        // stuff that was not run yet
-        flushQueuedEvents();
-
-        // no events and part render functions with Other Avatars' Scripts below All (pings run by themselves, see runPing)
-        // except ENTITY_INIT: it runs once, when the avatar first finds its entity, and is part of setting the avatar up
-        // (avatars hide the vanilla model there), so skipping it would show the vanilla model under theirs for good
-        if (scriptError || luaRuntime == null || !loaded || (scriptLevel() > 0 && !"ENTITY_INIT".equals(toRun))
-                || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
+        // not while the model walk of this avatar runs on a worker (it runs its part render functions there)
+        if (!awaitRenderJob())
+            return null;
+        if (!lockScripts())
             return null;
 
-        // run event, timing the render scripts
-        boolean renderTimed = limit == render || limit == worldRender;
-        boolean timed = renderTimed || org.figuramc.figura.benchmark.FiguraBenchmark.measuring;
-        long start = timed ? System.nanoTime() : 0L;
-        Varargs ret = luaRuntime.run(toRun, limit, args);
-        if (timed) {
-            long elapsed = System.nanoTime() - start;
-            org.figuramc.figura.benchmark.FiguraBenchmark.onLua(elapsed, renderTimed, toRun);
-            if (renderTimed) {
-                renderScriptNanos += elapsed;
-                // time limited avatars share this frame's render script budget
-                if (renderScriptInterval > 0)
-                    AvatarCulling.renderScriptPool -= elapsed;
+        try {
+            // stuff that was not run yet
+            flushQueuedEvents();
+
+            // no events and part render functions with Other Avatars' Scripts below All (pings run by themselves, see runPing)
+            // except ENTITY_INIT: it runs once, when the avatar first finds its entity, and is part of setting the avatar up
+            // (avatars hide the vanilla model there), so skipping it would show the vanilla model under theirs for good
+            if (scriptError || luaRuntime == null || !loaded || (scriptLevel() > 0 && !"ENTITY_INIT".equals(toRun))
+                    || (org.figuramc.figura.benchmark.FiguraBenchmark.NO_LUA && !isHost))
+                return null;
+
+            // run event, timing the render scripts
+            boolean renderTimed = limit == render || limit == worldRender;
+            boolean timed = renderTimed || org.figuramc.figura.benchmark.FiguraBenchmark.measuring;
+            long start = timed ? System.nanoTime() : 0L;
+            long lockWait = timed ? org.figuramc.figura.utils.FiguraWorkers.lockWaitNanos() : 0L;
+            Varargs ret = luaRuntime.run(toRun, limit, args);
+            if (timed) {
+                // on a worker, the time waiting for the render thread to let an api call through is not the script's
+                long elapsed = System.nanoTime() - start - (org.figuramc.figura.utils.FiguraWorkers.lockWaitNanos() - lockWait);
+                org.figuramc.figura.benchmark.FiguraBenchmark.onLua(elapsed, renderTimed, toRun);
+                if (renderTimed) {
+                    renderScriptNanos += elapsed;
+                    // time limited avatars share this frame's render script budget
+                    if (renderScriptInterval > 0)
+                        AvatarCulling.spendRenderScriptTime(elapsed);
+                }
             }
+
+            // stuff that this run produced
+            flushQueuedEvents();
+
+            // return
+            return ret;
+        } finally {
+            scriptLock.unlock();
         }
-
-        // stuff that this run produced
-        flushQueuedEvents();
-
-        // return
-        return ret;
     }
 
     // whether the script registered any function to this event, so callers can skip building its arguments
@@ -473,7 +545,14 @@ public class Avatar {
     @Nullable
     private Varargs runListened(String event, Instructions limit, Object... args) {
         if (!hasListeners(event)) {
-            flushQueuedEvents();
+            // queued events run with the next event instead while the model walk is out (they would wait for it here)
+            if (renderJob == null && lockScripts()) {
+                try {
+                    flushQueuedEvents();
+                } finally {
+                    scriptLock.unlock();
+                }
+            }
             return null;
         }
         return run(event, limit, args);
@@ -615,10 +694,18 @@ public class Avatar {
     }
 
     public void postRenderEvent(float delta, FiguraMat4 poseMatrix) {
-        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped()) {
-            long start = System.nanoTime();
-            runListened("POST_RENDER", render.post(), delta, scriptContext(), poseMatrix);
-            renderEventNanos += System.nanoTime() - start;
+        if (loaded && luaRuntime != null && luaRuntime.getUser() != null && !isRenderEventSkipped() && hasListeners("POST_RENDER")) {
+            String context = scriptContext();
+            Runnable post = () -> {
+                long start = System.nanoTime();
+                runListened("POST_RENDER", render.post(), delta, context, poseMatrix);
+                renderEventNanos += System.nanoTime() - start;
+            };
+            // the model walk of this avatar is on the workers: the event runs there right after it, like it does here right after
+            // the walk on the render thread (what it changes on the vanilla model shows from the next frame on)
+            org.figuramc.figura.model.rendering.ImmediateAvatarRenderer.ParallelWalk job = renderJob;
+            if (job == null || !job.runAfter(post))
+                post.run();
         }
         finishShadowScriptSharing();
         renderMode = EntityRenderMode.OTHER;
@@ -758,6 +845,7 @@ public class Avatar {
     }
 
     public void render(Entity entity, float yaw, float delta, float alpha, PoseStack stack, MultiBufferSource bufferSource, int light, int overlay, LivingEntityRenderer<?, ?> entityRenderer, PartFilterScheme filter, boolean translucent, boolean glowing) {
+        awaitRenderJob();
         if (renderer == null || !loaded)
             return;
 
@@ -775,6 +863,7 @@ public class Avatar {
     }
 
     public synchronized void worldRender(Entity entity, double camX, double camY, double camZ, PoseStack stack, MultiBufferSource bufferSource, int lightFallback, float tickDelta, EntityRenderMode mode) {
+        awaitRenderJob();
         if (renderer == null || !loaded)
             return;
 
@@ -800,7 +889,8 @@ public class Avatar {
     }
 
     public void capeRender(Entity entity, MultiBufferSource bufferSource, PoseStack stack, int light, float tickDelta, ModelPart cloak) {
-        if (renderer == null || !loaded)
+        // the pass only draws cape parts: without any it does nothing (and would wait for the model walk on the workers)
+        if (renderer == null || !loaded || !renderer.hasPartsFor(ParentType.Cape))
             return;
 
         FiguraMod.pushProfiler(FiguraMod.MOD_ID);
@@ -822,7 +912,8 @@ public class Avatar {
     }
 
     public void elytraRender(Entity entity, MultiBufferSource bufferSource, PoseStack stack, int light, float tickDelta, EntityModel<?> model) {
-        if (renderer == null || !loaded)
+        // same as the cape: only elytra parts are drawn here
+        if (renderer == null || !loaded || (!renderer.hasPartsFor(ParentType.LeftElytra) && !renderer.hasPartsFor(ParentType.RightElytra)))
             return;
 
         FiguraMod.pushProfiler(FiguraMod.MOD_ID);
@@ -1117,8 +1208,10 @@ public class Avatar {
 
     private static final PartCustomization PIVOT_PART_RENDERING_CUSTOMIZATION = new PartCustomization();
     public synchronized boolean pivotPartRender(ParentType parent, Consumer<PoseStack> consumer) {
-        if (renderer == null || !loaded || !parent.isPivot)
+        // a model without parts of this pivot type saves nothing for it: no need to wait for its model walk
+        if (renderer == null || !loaded || !parent.isPivot || !renderer.mayHaveParentType(parent))
             return false;
+        awaitRenderJob();
 
         Queue<Pair<FiguraMat4, FiguraMat3>> queue = renderer.pivotCustomizations.computeIfAbsent(parent, p -> new ConcurrentLinkedQueue<>());
 
@@ -1140,6 +1233,7 @@ public class Avatar {
     }
 
     public void updateMatrices(LivingEntityRenderer<?, ?> entityRenderer, PoseStack stack) {
+        awaitRenderJob();
         if (renderer == null || !loaded)
             return;
 
@@ -1197,6 +1291,13 @@ public class Avatar {
      * also closes and stops this avatar sounds
      */
     public void clean() {
+        // a model walk of this avatar is out (only during the level render): a thread other than the render thread (avatar
+        // downloads) hands the clean to the render thread instead of blocking until the walk is drawn
+        if (renderJob != null && !com.mojang.blaze3d.systems.RenderSystem.isOnRenderThread() && !org.figuramc.figura.utils.FiguraWorkers.isWorker()) {
+            Minecraft.getInstance().execute(this::clean);
+            return;
+        }
+        awaitRenderJob();
         cleaned = true;
 
         // load still running, free what it creates once it is done (on the client thread, textures touch the TextureManager)

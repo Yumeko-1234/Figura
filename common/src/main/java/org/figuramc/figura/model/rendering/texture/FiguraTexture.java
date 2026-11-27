@@ -23,14 +23,13 @@ import org.figuramc.figura.math.vector.FiguraVec4;
 import org.figuramc.figura.mixin.render.TextureManagerAccessor;
 import org.figuramc.figura.utils.ColorUtils;
 import org.figuramc.figura.utils.FiguraIdentifier;
+import org.figuramc.figura.utils.FileTexture;
 import org.figuramc.figura.utils.LuaUtils;
 import org.luaj.vm2.LuaError;
 import org.luaj.vm2.LuaFunction;
 import org.luaj.vm2.LuaValue;
-import org.lwjgl.BufferUtils;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.UUID;
@@ -253,10 +252,8 @@ public class FiguraTexture extends SimpleTexture {
 
     private static NativeImage read(byte[] data) {
         try {
-            ByteBuffer wrapper = BufferUtils.createByteBuffer(data.length);
-            wrapper.put(data);
-            wrapper.rewind();
-            return NativeImage.read(wrapper);
+            // memory freed by hand after the decode, see FileTexture.decode
+            return FileTexture.decode(data);
         } catch (IOException e) {
             FiguraMod.LOGGER.error("", e);
             return null;

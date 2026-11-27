@@ -64,6 +64,9 @@ dependencies {
         // the user's perf mod (-Pbhopt=<version>, benchmark BHOPT=<version>), copied into benchmark/mods
         if (project.hasProperty("bhopt"))
             modRuntimeOnly "blank:bhoptimization:${project.bhopt}"
+        // Accelerated Rendering (-Paccel=<version>, benchmark ACCEL=<version>), copied into benchmark/mods
+        if (project.hasProperty("accel"))
+            modRuntimeOnly "blank:acceleratedrendering:${project.accel}"
     }
 }
 

@@ -621,5 +621,10 @@ public class PartCustomization {
         public boolean isEmpty() {
             return size == 1;
         }
+
+        // back to empty, after a walk that threw half way
+        public void clear() {
+            size = 1;
+        }
     }
 }
